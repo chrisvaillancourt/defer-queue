@@ -1,0 +1,14 @@
+{
+  "name": "defer-queue",
+  "description": "Private Claude Code plugins by Chris Vaillancourt",
+  "owner": {
+    "name": "Chris Vaillancourt"
+  },
+  "plugins": [
+    {
+      "name": "defer-queue",
+      "source": "./",
+      "description": "Hold a prompt sent mid-turn until Claude finishes the turn, then send it as a turn of its own."
+    }
+  ]
+}
