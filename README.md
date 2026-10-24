@@ -61,22 +61,14 @@ That replaces the default `ctrl+enter` → `chat:sendNow`, which stays on `ctrl+
 
 ## Install
 
-The repository is its own marketplace (`.claude-plugin/marketplace.json`).
-
-To install from a local clone, run this in a terminal:
-
 ```sh
-claude plugin marketplace add <path to your clone>
-claude plugin install defer-queue@defer-queue
+claude plugin marketplace add chrisvaillancourt/defer-queue
+claude plugin install defer-queue@defer-queue --scope user
 ```
 
-A local-folder marketplace is read from the folder itself, so after editing, run `/reload-plugins` in a session.
+Or from inside Claude Code: `/plugin install defer-queue --marketplace chrisvaillancourt/defer-queue`.
 
-To install from GitHub, once the repository is pushed and you have access, type this at a Claude Code prompt:
-
-```
-/plugin install defer-queue --marketplace chrisvaillancourt/defer-queue
-```
+To work on it locally, add your clone as the marketplace instead (`claude plugin marketplace add <path to clone>`). The plugin is read from that folder; after editing, run `/reload-plugins`.
 
 To uninstall, run `claude plugin uninstall defer-queue@defer-queue`.
 

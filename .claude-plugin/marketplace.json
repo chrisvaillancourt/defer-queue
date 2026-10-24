@@ -1,6 +1,6 @@
 {
   "name": "defer-queue",
-  "description": "Private Claude Code plugins by Chris Vaillancourt",
+  "description": "Holds a prompt sent mid-turn until Claude finishes the turn, then sends it as a turn of its own, like omp's follow-up queue.",
   "owner": {
     "name": "Chris Vaillancourt"
   },
