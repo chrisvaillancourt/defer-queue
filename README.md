@@ -33,7 +33,9 @@ A held prompt is resent with `$.prompt.submit({ asUser: true })`, so some things
 - **Slash commands and `!` shell lines** aren't held. Claude Code already runs them after the turn ends.
 - **An IDE selection or hook-added context** from the original submission isn't kept.
 
-If Claude Code or a hook refuses the resend, the prompt goes back to the prompt box.
+If Claude Code or a hook refuses the resend, the prompt goes back to the prompt box. If the box can't take it either (a dialog is open), it goes back first in the queue and the queue pauses until you press **Send next**, so a refused prompt is never retried on its own.
+
+A plugin reload (saving the plugin's files, `/reload-plugins`, an update) while a held prompt is being sent can't tell whether it went out. That prompt is kept under **Not sent** marked "may already have been sent", it is not resent, and the queue pauses.
 
 ## Keys
 

@@ -8,7 +8,7 @@ type SubmitAnswer = (text: string) => PromptSubmitResult | Promise<PromptSubmitR
 // The test's hooks sit beneath the plugin and stand for the engine: they record
 // what the plugin submits, fills and shows. `answer` stands for what the engine
 // does with a submitted prompt (by default it enters).
-function bottoms(on: On, answer: SubmitAnswer = text => ({ text })) {
+function bottoms(on: On, answer: SubmitAnswer = text => ({ text }), canFill: () => boolean = () => true) {
   const submitted: Submitted[] = []
   const filled: string[] = []
   const toasts: string[] = []
@@ -19,6 +19,7 @@ function bottoms(on: On, answer: SubmitAnswer = text => ({ text })) {
     return answer(e.text)
   })
   on('prompt.fill', ($, e) => {
+    if (!canFill()) return { isFilled: false, refusal: 'dialog' }
     filled.push(e.text)
     return { isFilled: true }
   })
@@ -355,6 +356,60 @@ describe('when a release fails', () => {
     await $.turn.complete(endTurn('answer'))
     await settle()
     expect(submitted.map(s => s.text)).toEqual(['first', 'second'])
+  })
+
+  for (const how of ['rejected', 'dropped'] as const) {
+    test(`a ${how} resend the prompt box can't take goes back ahead of newer prompts, and the queue pauses`, async ($, on) => {
+      let fail = true
+      const { submitted, settle } = bottoms(
+        on,
+        text => {
+          if (!fail) return { text }
+          if (how === 'dropped') return { drop: 'blocked by policy' }
+          throw new Error('nope')
+        },
+        () => false,
+      )
+      await $.session.start(SESSION)
+      await startTurn($)
+      await $.prompt.submit(typedMidTurn('first', true))
+      await $.prompt.submit(typedMidTurn('second', true))
+      await $.turn.complete(endTurn('answer'))
+      await settle()
+      fail = false
+      await startTurn($, 't2')
+      await $.prompt.submit({ ...typedMidTurn('third', true), turnId: 't2' })
+      await $.turn.complete(endTurn('answer', undefined, 't2'))
+      await settle()
+      expect(submitted.map(s => s.text)).toEqual(['first'])
+      const listed = (await run($, '')).text ?? ''
+      expect(listed).toMatch(/paused/i)
+      expect(listed.indexOf('first')).toBeLessThan(listed.indexOf('second'))
+      const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, isWorking: false } })
+      await ui.press({ key: 'send' })
+      await settle()
+      expect(submitted.map(s => s.text)).toEqual(['first', 'first'])
+    })
+  }
+
+  test('a release left unsettled by a reload is not resent, and is listed as maybe sent', async ($, on) => {
+    const gate = deferred<PromptSubmitResult>()
+    const { submitted, settle } = bottoms(on, () => gate.promise)
+    await $.session.start(SESSION)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('first', true))
+    await $.prompt.submit(typedMidTurn('second', true))
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    // A hot reload runs session.start again; the old module's callbacks are gone.
+    await $.session.start(SESSION)
+    await startTurn($, 't2')
+    await $.turn.complete(endTurn('answer', undefined, 't2'))
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['first'])
+    expect((await run($, '')).text).toMatch(/first.*may already have been sent/)
+    gate.resolve({ text: 'first' })
+    await settle()
   })
 
   test('a resend a hook beneath drops goes back to the prompt box', async ($, on) => {
