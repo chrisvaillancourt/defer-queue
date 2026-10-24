@@ -17,7 +17,13 @@ Stock Claude Code folds a message you queue mid-turn into the running turn as so
   - **Discard** drops them.
   - **Send next** appears only while idle.
 
-Set **Defer every mid-turn prompt** (`defer_all_mid_turn`) in `/config` to hold every prompt typed while Claude works, so nothing steers.
+## Options
+
+| Option (`/config`) | Default | What it does |
+|---|---|---|
+| **Defer every mid-turn prompt** (`defer_all_mid_turn`) | off | Holds every prompt you type while Claude works, so nothing steers. Not an omp behavior: omp's plain Enter always steers. |
+
+There are no steering or interrupt mode settings: Claude Code keeps its own steering, and a plugin can't change how it works.
 
 ## When held prompts go out
 
@@ -28,6 +34,7 @@ Set **Defer every mid-turn prompt** (`defer_all_mid_turn`) in `/config` to hold 
 - **`/clear` (and a resume) moves them back** to the prompt box. Prompts written for the old conversation aren't sent into the new one, and a send scheduled before the `/clear` is cancelled. omp discards its queue here; this mod hands it back so nothing is lost. If the box can't take them, or a prompt was mid-send, they're kept under **Not sent** (below).
 - **Not sent** is a second list in the band, and in `/queue`: prompts the mod will never send on its own (from before a `/clear` the box couldn't take, or a send a reload left unsettled, marked "may already have been sent"). **Put back in prompt box** or **Drop** them.
 - **Exiting the session loses them.** They are kept for the session only.
+- **Queue input never jumps the line.** `/queue` or `->` sent while idle goes behind anything already waiting, and the oldest is sent.
 
 ## What a held prompt can't carry
 
@@ -59,7 +66,7 @@ The repository is its own marketplace (`.claude-plugin/marketplace.json`).
 To install from a local clone, run this in a terminal:
 
 ```sh
-claude plugin marketplace add ~/dev/github/chrisvaillancourt/defer-queue
+claude plugin marketplace add <path to your clone>
 claude plugin install defer-queue@defer-queue
 ```
 
@@ -73,11 +80,35 @@ To install from GitHub, once the repository is pushed and you have access, type 
 
 To uninstall, run `claude plugin uninstall defer-queue@defer-queue`.
 
+## Differences from omp
+
+The queue follows omp's follow-up queue where Claude Code's plugin interface allows it. Where it doesn't, or where omp's behavior could lose a prompt, it differs on purpose:
+
+- **Turns, not one run.** omp feeds a follow-up into the same agent run once the work would yield. Here each held prompt is a turn of its own, sent after the previous turn ends with an answer.
+- **Esc restores after the stop.** omp withdraws queued input before it aborts. A plugin hears of the interrupt only from the turn's end, so the prompts come back just after.
+- **`/clear` hands back.** omp discards its queue on a reset; this puts the prompts in the prompt box, or under **Not sent**.
+- **Errors and refusals hold.** omp's recovery logic can resume a queue after some failures; here held prompts wait for the next answered turn or **Send next**.
+- **No dequeue key.** omp's Alt+Up takes back the newest entry; here it's the band's **Take back** button. A plugin can't bind a new global key.
+- **One mode.** omp's `followUpMode: "all"` delivers several queued prompts at once; Claude Code has no batch submit, so there is only one at a time. **Take back all** is the closest edit.
+- **No attachments.** omp carries images through the queue; Claude Code can't resubmit them, so a prompt with an attachment isn't held.
+- **Skills and commands.** omp can queue a skill as a follow-up; here slash commands and `!` lines are left to Claude Code, which already runs them after the turn.
+
+## Cost
+
+Nothing extra. The mod makes no model calls and adds nothing to the system prompt; each held prompt costs what typing it after the turn would.
+
+## Limitations
+
+- Held prompts live in session state: exiting the session loses them.
+- After a reload mid-send, a prompt can't be known sent or not; it is kept under **Not sent**, not resent.
+- `@file` mentions, attachments, IDE selections and hook-added context from the original submission don't survive a resend (see above). The first item of an idle `->` list is the exception: it goes through as your own prompt.
+- Claude Code 2.1.310 leaves a dropped prompt's text in the prompt box; the mod clears the box when it still holds exactly the held text. Text you typed after it is left alone, so you may have to clear a leftover by hand.
+- Tested in the terminal only. The desktop app and VS Code may stamp prompts with a different origin.
+
 ## Develop
 
-- `claude plugin test .` runs `tests/*.test.tsx` against the engine.
-- `claude plugin validate .` checks the manifest and hooks.
-- `claude --plugin-dir .` runs a session with this working copy.
-- To type-check: Claude Code writes `.claude-plugin/types/` (gitignored) whenever it loads the plugin, and `tsconfig.json` extends it, so `tsc -p .` works after one load.
+- `scripts/check.sh` runs every commit gate: `claude plugin validate .`, `claude plugin test .` (`tests/*.test.ts(x)`), and a typecheck.
+- `claude --plugin-dir .` runs a session with this working copy. If defer-queue is also installed, add `--settings '{"enabledPlugins":{"defer-queue@defer-queue":false}}'` so only the working copy loads.
+- `uv run python scripts/drive.py --workdir <scratch dir>` drives a live interactive session through a pty (queueing needs a running turn and a key a headless run can't send) and checks the core flow with a throwaway observer mod: about five short Haiku turns.
 
-The hooks API is early access and changes between Claude Code releases. This build was tested against Claude Code 2.1.310, in the terminal (2.1.310 raises `turn.start` for subagent runs too). The desktop app and VS Code may stamp prompts with a different origin, and haven't been tested.
+The hooks API is early access and changes between Claude Code releases. This build was tested against Claude Code 2.1.310, in the terminal (2.1.310 raises `turn.start` for subagent runs too).

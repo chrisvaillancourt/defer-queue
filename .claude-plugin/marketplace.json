@@ -8,7 +8,7 @@
     {
       "name": "defer-queue",
       "source": "./",
-      "description": "Hold a prompt sent mid-turn until Claude finishes the turn, then send it as a turn of its own."
+      "description": "omp-style follow-up queue: hold a prompt sent mid-turn until Claude finishes the turn, then send it as a turn of its own."
     }
   ]
 }

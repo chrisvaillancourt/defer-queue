@@ -1,14 +1,16 @@
 {
   "name": "defer-queue",
-  "version": "0.1.0",
-  "description": "Hold a prompt sent mid-turn until Claude finishes the turn, then send it as a turn of its own (no steering).",
-  "author": { "name": "Chris Vaillancourt" },
+  "version": "0.2.0",
+  "description": "omp-style follow-up queue: hold a prompt sent mid-turn (ctrl+x enter, -> / =>, or /queue) until Claude finishes the turn, then send it as a turn of its own (no steering).",
+  "author": {
+    "name": "Chris Vaillancourt"
+  },
   "types": "./types/index.d.ts",
   "userConfig": {
     "defer_all_mid_turn": {
       "type": "boolean",
       "title": "Defer every mid-turn prompt",
-      "description": "Off: only prompts sent with chat:queueSubmit (ctrl+x enter) wait for the turn to end. On: every prompt typed while Claude works waits, so nothing steers a running turn.",
+      "description": "Off: only prompts sent with chat:queueSubmit (ctrl+x enter), -> / => or /queue wait for the turn to end. On: every prompt typed while Claude works waits, so nothing steers (not an omp behavior).",
       "default": false
     }
   }
