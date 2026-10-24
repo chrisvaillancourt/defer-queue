@@ -288,9 +288,11 @@ async function takeAllItems($: EngineInterface): Promise<Entry[]> {
 }
 
 async function takeBackAll($: EngineInterface): Promise<void> {
+  const { paused: wasPaused } = await getQ($)
   const taken = await takeAllItems($)
   if (await handBack($, taken.map(m => m.text))) return
-  await updQ($, q => ({ ...q, items: insertBySeq(q.items, taken) }))
+  // A failed edit never grants delivery: the pause they had comes back.
+  await updQ($, q => ({ ...q, items: insertBySeq(q.items, taken), paused: q.paused || wasPaused }))
   toast($, 'Could not reach the prompt box; kept the queued prompts')
 }
 

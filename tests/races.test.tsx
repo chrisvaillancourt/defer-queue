@@ -212,3 +212,44 @@ describe('across a /clear that empties plugin state', () => {
     expect(sent).toEqual([])
   })
 })
+
+describe('pause safety', () => {
+  test('a failed Take back all keeps the pause an interrupt left', async ($, on) => {
+    const { sent, settle } = bottoms(on, () => ({ isFilled: false, refusal: 'dialog' }))
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'work', turnId: 't1' })
+    await $.prompt.submit(typed('A'))
+    await $.prompt.submit(typed('B'))
+    await $.turn.complete(ended('aborted'))
+    const ui = await $.ui.mount(BAND)
+    await ui.press({ key: 'take-back-all' })
+    await $.turn.start({ text: 'background notification', turnId: 't2' })
+    await $.turn.complete(ended('answer', 't2'))
+    await settle()
+    expect(sent).toEqual([])
+    expect((await list($)).text).toMatch(/paused/)
+  })
+
+  test('a failed Take back keeps the pause a refused release left', async ($, on) => {
+    let fails = true
+    const { sent, settle } = bottoms(
+      on,
+      () => ({ isFilled: false, refusal: 'dialog' }),
+      text => (fails ? { drop: 'blocked' } : { text }),
+    )
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'work', turnId: 't1' })
+    await $.prompt.submit(typed('A'))
+    await $.prompt.submit(typed('B'))
+    await $.turn.complete(ended('answer'))
+    await settle()
+    fails = false
+    const ui = await $.ui.mount(BAND)
+    await ui.press({ key: 'take-back' })
+    await $.turn.start({ text: 'background notification', turnId: 't2' })
+    await $.turn.complete(ended('answer', 't2'))
+    await settle()
+    expect(sent).toEqual(['A'])
+    expect((await list($)).text).toMatch(/paused/)
+  })
+})
