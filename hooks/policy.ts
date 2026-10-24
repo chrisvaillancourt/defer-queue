@@ -10,6 +10,7 @@ export const EMPTY: Queue = {
   claim: null,
   paused: false,
   recovery: [],
+  pending: [],
 }
 
 /**
@@ -24,6 +25,7 @@ export function mergeCarry(q: Queue, carried: Queue): Queue {
     epoch: Math.max(q.epoch, carried.epoch),
     nextSeq: Math.max(q.nextSeq, carried.nextSeq),
     recovery: [...bySeq.values()].sort((a, b) => a.seq - b.seq),
+    pending: [...new Map([...carried.pending, ...q.pending].map(p => [p.id, p])).values()],
   }
 }
 
@@ -159,6 +161,8 @@ export const isCommandLike = (text: string) => /^\s*[/!]/.test(text)
 export function listText(q: Queue): string {
   const lines: string[] = []
   if (q.claim !== null) lines.push(`Sending: ${firstLine(q.claim.entry.text)}`)
+  const back = q.pending.reduce((n, p) => n + p.entries.length, 0)
+  if (back > 0) lines.push(`Going back to the prompt box: ${back}`)
   if (q.items.length === 0) lines.push('Nothing is queued.')
   else {
     lines.push(`Queued${q.paused ? ' (paused: press Send next to resume)' : ''} (${q.items.length}):`)

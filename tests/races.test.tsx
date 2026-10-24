@@ -253,3 +253,59 @@ describe('pause safety', () => {
     expect((await list($)).text).toMatch(/paused/)
   })
 })
+
+describe('handbacks in flight across /clear', () => {
+  for (const wiped of [false, true]) {
+    for (const key of ['take-back', 'take-back-all'] as const) {
+      test(`a ${key} refused after /clear goes under Not sent, never back into the queue${wiped ? ' (state emptied)' : ''}`, async ($, on) => {
+        const entered = deferred<void>()
+        const gate = deferred<PromptFillResult>()
+        const { sent, settle } = bottoms(on, () => {
+          entered.resolve()
+          return gate.promise
+        })
+        const sid = wiped ? perSessionState(on) : { value: 's1' }
+        if (!wiped) on('session.id', () => ({ value: sid.value }))
+        await $.session.start(SESSION)
+        await $.turn.start({ text: 'work', turnId: 't1' })
+        await $.prompt.submit(typed('OLD-CONTEXT-A'))
+        // Take back all is drawn with two or more held.
+        if (key === 'take-back-all') await $.prompt.submit(typed('OLD-CONTEXT-B'))
+        const ui = await $.ui.mount(BAND)
+        const taking = ui.press({ key })
+        await entered.promise
+        await clear($, sid)
+        gate.resolve({ isFilled: false, refusal: 'dialog' })
+        await taking
+        await $.turn.start({ text: 'new conversation', turnId: 't2' })
+        await $.turn.complete(ended('answer', 't2'))
+        await settle()
+        expect(sent).toEqual([])
+        expect((await list($)).text).toMatch(/Not sent[\s\S]*OLD-CONTEXT-A/)
+      })
+    }
+  }
+
+  test('an interrupt restore refused after /clear goes under Not sent', async ($, on) => {
+    const entered = deferred<void>()
+    const gate = deferred<PromptFillResult>()
+    const { sent, settle } = bottoms(on, () => {
+      entered.resolve()
+      return gate.promise
+    })
+    const sid = perSessionState(on)
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'work', turnId: 't1' })
+    await $.prompt.submit(typed('OLD-A'))
+    const ending = $.turn.complete(ended('aborted'))
+    await entered.promise
+    await clear($, sid)
+    gate.resolve({ isFilled: false, refusal: 'dialog' })
+    await ending
+    await $.turn.start({ text: 'new conversation', turnId: 't2' })
+    await $.turn.complete(ended('answer', 't2'))
+    await settle()
+    expect(sent).toEqual([])
+    expect((await list($)).text).toMatch(/Not sent[\s\S]*OLD-A/)
+  })
+})

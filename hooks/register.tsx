@@ -17,7 +17,7 @@ import type { Entry, Queue } from '../types'
 
 // The whole queue in one record (see AGENTS.md). Change the shape tag when
 // Queue's fields change: a value an older version stored then reads as EMPTY.
-const queue = atom({ plugin: 'defer-queue', key: 'queue' } as const, EMPTY, { shape: 'queue-1' })
+const queue = atom({ plugin: 'defer-queue', key: 'queue' } as const, EMPTY, { shape: 'queue-2' })
 // 0.1's keys, emptied into `queue` once on session.start so an upgrade
 // mid-session keeps what was held.
 const legacyHeld = atom({ plugin: 'defer-queue', key: 'held' } as const, [])
@@ -207,6 +207,11 @@ async function adoptOnLoad($: EngineInterface): Promise<void> {
       }
     }
     if (next.runningTurn === null && oldRunning !== null) next = { ...next, runningTurn: oldRunning }
+    if (next.pending.length > 0) {
+      // Handbacks a reload interrupted: whether the box took them is unknown,
+      // so they are kept under Not sent rather than queued again.
+      next = mergeCarry({ ...next, pending: [] }, { ...EMPTY, recovery: next.pending.flatMap(p => p.entries) })
+    }
     if (next.claim !== null) {
       const { entry, token } = next.claim
       next = { ...next, claim: null, paused: true, recovery: [...next.recovery, { ...entry, token, maybeSent: true }] }
@@ -287,42 +292,79 @@ async function takeAllItems($: EngineInterface): Promise<Entry[]> {
   return taken
 }
 
+// Hands entries the queue picks back to the prompt box, owning them in state
+// (`pending`) until the box answers, so a /clear or reload in between can
+// see them. Taken off `items` in the same update that records them. If the
+// box refuses: back to their place in the queue with the pause they had (or
+// paused, for an interrupt), unless a /clear came since, when they go to
+// recovery instead. A failed edit never grants delivery.
+async function handBackFromQueue(
+  $: EngineInterface,
+  pick: (items: readonly Entry[]) => Entry[],
+  pauseOnFail: boolean,
+): Promise<'none' | 'box' | 'queue' | 'recovery'> {
+  const id = newToken()
+  let taken: Entry[] = []
+  await updQ($, q => {
+    taken = pick(q.items)
+    if (taken.length === 0) return q
+    const seqs = new Set(taken.map(m => m.seq))
+    return {
+      ...q,
+      items: q.items.filter(m => !seqs.has(m.seq)),
+      pending: [...q.pending, { id, epoch: q.epoch, entries: taken, wasPaused: q.paused, pauseOnFail }],
+    }
+  })
+  if (taken.length === 0) return 'none'
+  const entries = taken
+  const isBack = await handBack($, entries.map(m => m.text))
+  let where: 'box' | 'queue' | 'recovery' = 'box'
+  await updQ($, q => {
+    const mine = q.pending.find(p => p.id === id)
+    const pending = q.pending.filter(p => p.id !== id)
+    if (isBack) {
+      where = 'box'
+      return { ...q, pending, paused: q.items.length === 0 ? false : q.paused }
+    }
+    if (mine === undefined || mine.epoch !== q.epoch) {
+      // A /clear came since (or a reload lost the record): old input never
+      // re-enters the new conversation's queue.
+      where = 'recovery'
+      return mergeCarry({ ...q, pending }, { ...EMPTY, recovery: mine?.entries ?? entries })
+    }
+    where = 'queue'
+    return {
+      ...q,
+      pending,
+      items: insertBySeq(q.items, mine.entries),
+      paused: q.paused || mine.wasPaused || mine.pauseOnFail,
+    }
+  })
+  return where
+}
+
+function sayKept($: EngineInterface, where: 'none' | 'box' | 'queue' | 'recovery', what: string): void {
+  if (where === 'queue') toast($, `Could not reach the prompt box; kept ${what} in the queue`)
+  if (where === 'recovery') toast($, `Could not reach the prompt box; kept ${what} under "Not sent" (from before /clear)`)
+}
+
 async function takeBackAll($: EngineInterface): Promise<void> {
-  const { paused: wasPaused } = await getQ($)
-  const taken = await takeAllItems($)
-  if (await handBack($, taken.map(m => m.text))) return
-  // A failed edit never grants delivery: the pause they had comes back.
-  await updQ($, q => ({ ...q, items: insertBySeq(q.items, taken), paused: q.paused || wasPaused }))
-  toast($, 'Could not reach the prompt box; kept the queued prompts')
+  sayKept($, await handBackFromQueue($, items => [...items], false), 'the queued prompts')
 }
 
 // omp's dequeue: the newest entry alone back into the prompt box, the turn
 // left running.
 async function takeBackNewest($: EngineInterface): Promise<void> {
-  let taken: Entry | undefined
-  await updQ($, q => {
-    taken = q.items.at(-1)
-    return taken === undefined ? q : { ...q, items: q.items.slice(0, -1) }
-  })
-  if (taken === undefined) return
-  const entry = taken
-  if (await handBack($, [entry.text])) {
-    await updQ($, q => (q.items.length === 0 ? { ...q, paused: false } : q))
-    return
-  }
-  await updQ($, q => ({ ...q, items: insertBySeq(q.items, [entry]) }))
-  toast($, 'Could not reach the prompt box; kept the queued prompt')
+  sayKept($, await handBackFromQueue($, items => items.slice(-1), false), 'the queued prompt')
 }
 
 // omp's Esc: an interrupted main turn hands every queued entry back, oldest
 // first, after the draft, and sends nothing. If the box can't take them
 // they stay queued, paused, so no later answer sends them unasked.
 async function restoreAfterAbort($: EngineInterface): Promise<void> {
-  const taken = await takeAllItems($)
-  if (taken.length === 0) return
-  if (await handBack($, taken.map(m => m.text))) return
-  await updQ($, q => ({ ...q, items: insertBySeq(q.items, taken), paused: true }))
-  toast($, `Turn interrupted; could not reach the prompt box, so ${taken.length} queued prompt(s) wait, paused`)
+  const where = await handBackFromQueue($, items => [...items], true)
+  if (where === 'queue') toast($, 'Turn interrupted; could not reach the prompt box, so the queued prompts wait, paused')
+  else sayKept($, where, 'the queued prompts')
 }
 
 // /clear or a resume: prompts written for the old conversation don't belong
