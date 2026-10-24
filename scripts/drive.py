@@ -77,7 +77,11 @@ export const register: Register = on => {
     await log($, { ev: 'prompt.submit', text: e.text, origin: e.origin, wait: e.wait, turnId: e.turnId, drop: r.drop })
     return r
   })
-  on('prompt.fill', async ($, e, next) => { await log($, { ev: 'prompt.fill', text: e.text, mode: e.mode }); return next(e) })
+  on('prompt.fill', async ($, e, next) => {
+    const r = await next(e)
+    await log($, { ev: 'prompt.fill', text: e.text, mode: e.mode, isFilled: r.isFilled })
+    return r
+  })
   on('turn.start', async ($, e, next) => {
     await log($, { ev: 'turn.start', turnId: e.turnId, agentId: e.agentId, text: e.text.slice(0, 80) })
     return next(e)
@@ -279,7 +283,7 @@ def main() -> int:
         expect(wait_for(s, out, lambda r: len(main_completions(r, "aborted")) >= 1, 30), "turn ended aborted after Esc")
         s.pump(5)
         rows = events(out)
-        fills = [x["text"] for x in rows if x["ev"] == "prompt.fill"]
+        fills = [x["text"] for x in rows if x["ev"] == "prompt.fill" and x.get("isFilled")]
         expect(any("Reply with only the word FIVE." in f for f in fills), f"FIVE filled back into the box: {fills}")
         expect("Reply with only the word FIVE." not in plugin_submits(rows), "FIVE was not sent")
 
@@ -323,7 +327,8 @@ def main() -> int:
         started = [x["text"] for x in rows if x["ev"] == "turn.start" and x.get("agentId") is None
                    and ("SEVEN" in x.get("text", "") or "EIGHT" in x.get("text", ""))]
         expect(started == [], f"neither held prompt started a turn across /clear: {started}")
-        fills = " ".join(x["text"] for x in rows if x["ev"] == "prompt.fill")
+        # Only fills the box took count as recovery; a refused fill is a loss unless Not sent shows it.
+        fills = " ".join(x["text"] for x in rows if x["ev"] == "prompt.fill" and x.get("isFilled"))
         # /queue's answer never reaches the observer (defer-queue answers it),
         # so read the screen: what follows the last "Not sent" heading.
         screen = s.text.decode("utf-8", "replace")
