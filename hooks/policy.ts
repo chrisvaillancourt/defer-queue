@@ -14,12 +14,17 @@ export const EMPTY: Queue = {
 }
 
 /**
- * Folds what a /clear carried over into the new session's queue. Idempotent:
- * recovery entries are kept once by `seq`, epoch and nextSeq only grow.
+ * Adopts a /clear carry into the new session's queue, all of it. What the
+ * carry holds besides Not sent and handbacks (an entry held, or a release
+ * claimed, while it owned the queue) belongs to the old conversation, so it
+ * goes under Not sent too (a claim marked "may already have been sent"),
+ * never into the new queue. Idempotent: recovery entries are kept once by
+ * `seq`, epoch and nextSeq only grow.
  */
 export function mergeCarry(q: Queue, carried: Queue): Queue {
   const bySeq = new Map<number, Queue['recovery'][number]>()
-  for (const r of [...carried.recovery, ...q.recovery]) bySeq.set(r.seq, r)
+  const claimed = carried.claim === null ? [] : [{ ...carried.claim.entry, token: carried.claim.token, maybeSent: true as const }]
+  for (const r of [...carried.recovery, ...carried.items, ...claimed, ...q.recovery]) bySeq.set(r.seq, r)
   return {
     ...q,
     epoch: Math.max(q.epoch, carried.epoch),

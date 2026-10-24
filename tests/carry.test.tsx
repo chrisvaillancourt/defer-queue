@@ -73,3 +73,47 @@ test('adoption waits out a /clear whose handback takes longer than every early r
   const persisted = JSON.stringify(stores.s2?.get('defer-queue/queue')?.value ?? null)
   expect(persisted).toContain('RECOVER_AFTER_SLOW_CLEAR')
 })
+
+// Holds one person prompt back 100 ms before defer-queue sees it, so it
+// arrives while the /clear carry owns the queue.
+const slowPerson = {
+  name: 'slow-person-hook',
+  tier: 'prepend',
+  register(on) {
+    on('prompt.submit', async ($, e, next) => {
+      if (e.origin.kind === 'composer' && e.text === 'ARRIVING_DURING_CLEAR') await $.clock.sleep(100)
+      return next(e)
+    })
+  },
+} as const satisfies Plugin
+
+test('a prompt held while the carry owns the queue is adopted under Not sent, never lost', { plugins: [slowPerson] }, async ($, on) => {
+  const entered = deferred<void>()
+  const gate = deferred<PromptFillResult>()
+  const { clock, sid, sent } = fixture(on, () => {
+    entered.resolve()
+    return gate.promise
+  })
+  await $.session.start(SESSION)
+  await $.turn.start({ text: 'work', turnId: 't1' })
+  await $.prompt.submit(typed('OLD_A'))
+  const arriving = $.prompt.submit(typed('ARRIVING_DURING_CLEAR'))
+  await clock.settle()
+  await $.turn.complete(ended('error'))
+  const clearing = $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+  await entered.promise
+  await clock.advance(100)
+  expect((await arriving).drop).toMatch(/Queued/)
+  gate.resolve({ isFilled: false, refusal: 'dialog' })
+  await clearing
+  sid.value = 's2'
+  await clock.advance(200)
+  const listed = (await $.command.run(LIST)).text ?? ''
+  expect(listed).toContain('Nothing is queued.')
+  expect(listed.slice(listed.indexOf('Not sent'))).toContain('ARRIVING_DURING_CLEAR')
+  // It belongs to the old conversation: nothing sends it into the new one.
+  await $.turn.start({ text: 'new', turnId: 't2' })
+  await $.turn.complete(ended('answer', 't2'))
+  await clock.settle()
+  expect(sent).not.toContain('ARRIVING_DURING_CLEAR')
+})
