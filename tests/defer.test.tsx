@@ -42,6 +42,13 @@ function bottoms(on: On, answer: SubmitAnswer = text => ({ text }), canFill: () 
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  // A /clear or resume goes on under a new session id, as the engine does.
+  const sid = { value: 's1' }
+  on('session.id', () => ({ value: sid.value }))
+  on('session.end', ($, e) => {
+    sid.value = `${e.sessionId}-next`
+    return { sessionId: e.sessionId }
+  })
   on('ui.render', ($, e) => { const { Box } = $.ui.resolve(e); return <Box /> })
   return { submitted, filled, toasts, registered, box, settle: clock.settle }
 }
@@ -668,7 +675,6 @@ describe('ordering and session changes', () => {
 
   test('/clear hands held prompts back to the prompt box', async ($, on) => {
     const { submitted, filled, settle } = bottoms(on)
-    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
     await startTurn($)
     await $.prompt.submit(typedMidTurn('first', true))
     await $.turn.complete(endTurn('error'))
@@ -683,7 +689,6 @@ describe('ordering and session changes', () => {
 
   test('a resume hands held prompts back too', async ($, on) => {
     const { filled, settle } = bottoms(on)
-    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
     await startTurn($)
     await $.prompt.submit(typedMidTurn('first', true))
     await $.session.end({ reason: 'resume', sessionId: 's1', resume: { id: 's1' } })
@@ -694,7 +699,6 @@ describe('ordering and session changes', () => {
   test('/clear during a release keeps the rest out of the new conversation, and a late settle changes nothing there', async ($, on) => {
     const gate = deferred<PromptSubmitResult>()
     const { submitted, filled, settle } = bottoms(on, () => gate.promise)
-    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
     await $.session.start(SESSION)
     await startTurn($)
     await $.prompt.submit(typedMidTurn('first', true))
@@ -722,7 +726,6 @@ describe('ordering and session changes', () => {
     const gate = deferred<PromptSubmitResult>()
     let calls = 0
     const { submitted, filled, settle } = bottoms(on, text => (calls++ === 0 ? gate.promise : { text }))
-    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
     await $.session.start(SESSION)
     await startTurn($)
     await $.prompt.submit(typedMidTurn('first', true))
@@ -744,7 +747,6 @@ describe('ordering and session changes', () => {
 
   test('a send scheduled before /clear does not fire into the new conversation', async ($, on) => {
     const { submitted, settle } = bottoms(on)
-    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
     await $.session.start(SESSION)
     await run($, 'old')
     await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
@@ -757,7 +759,6 @@ describe('ordering and session changes', () => {
   test("prompts /clear can't hand back are kept under Not sent, never sent, and can be put back", async ($, on) => {
     let canFill = false
     const { submitted, filled, settle } = bottoms(on, undefined, () => canFill)
-    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
     await $.session.start(SESSION)
     await startTurn($)
     await $.prompt.submit(typedMidTurn('first', true))

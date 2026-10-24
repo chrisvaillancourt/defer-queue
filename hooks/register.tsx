@@ -9,6 +9,7 @@ import {
   isCommandLike,
   appendText,
   listText,
+  mergeCarry,
   parseQueueShorthand,
   splitQueuedMessages,
 } from './policy'
@@ -21,6 +22,38 @@ const queue = atom({ plugin: 'defer-queue', key: 'queue' } as const, EMPTY, { sh
 // mid-session keeps what was held.
 const legacyHeld = atom({ plugin: 'defer-queue', key: 'held' } as const, [])
 const legacyRunningTurn = atom({ plugin: 'defer-queue', key: 'runningTurn' } as const, null)
+
+// Live on 2.1.310, $.state is held per session id and /clear starts a new
+// one, so the queue reads empty after it. What must outlive the /clear (the
+// bumped epoch, Not sent) is carried in this module variable from session.end
+// and merged into the new session's state at its first access. A reload
+// between the /clear and that access loses the carry (module variables don't
+// survive one); README lists it.
+let carry: { from: string; value: Queue } | null = null
+
+async function adoptCarry($: EngineInterface): Promise<void> {
+  const c = carry
+  if (c === null) return
+  let id: string
+  try {
+    id = await $.session.id()
+  } catch {
+    return
+  }
+  if (id === c.from || carry !== c) return
+  carry = null
+  await update($, queue, q => mergeCarry(q, c.value))
+}
+
+async function getQ($: EngineInterface): Promise<Queue> {
+  await adoptCarry($)
+  return read($, queue)
+}
+
+async function updQ($: EngineInterface, change: (q: Queue) => Queue): Promise<Queue> {
+  await adoptCarry($)
+  return update($, queue, change)
+}
 
 const BAND_ROWS = 5
 
@@ -35,7 +68,7 @@ const newToken = () => `${Date.now()}-${(lastToken += 1)}`
 
 /** Queues texts at the back. `turnId`, when given, is a running main turn the engine attests. */
 async function hold($: EngineInterface, texts: readonly string[], turnId?: string): Promise<Queue> {
-  return update($, queue, q => ({
+  return updQ($, q => ({
     ...q,
     runningTurn: q.runningTurn ?? turnId ?? null,
     nextSeq: q.nextSeq + texts.length,
@@ -88,7 +121,7 @@ function toast($: EngineInterface, text: string) {
 async function releaseNext($: EngineInterface, why: 'auto' | 'explicit', epoch?: number): Promise<void> {
   const token = newToken()
   let sending: Entry | undefined
-  await update($, queue, q => {
+  await updQ($, q => {
     sending = undefined
     const head = q.items[0]
     if (head === undefined || q.claim !== null) return q
@@ -113,7 +146,7 @@ async function settleRelease($: EngineInterface, token: string, failure: string 
   if (failure === `dropped: ${STALE_RELEASE}`) {
     // Refused at admission (see admitOwnRelease): it was not sent, and it
     // belongs to the old conversation, so it stays under Not sent.
-    await update($, queue, q => ({
+    await updQ($, q => ({
       ...q,
       recovery: q.recovery.map(r => (r.token === token ? { seq: r.seq, text: r.text } : r)),
     }))
@@ -121,19 +154,19 @@ async function settleRelease($: EngineInterface, token: string, failure: string 
     return
   }
   if (failure === undefined) {
-    await update($, queue, q =>
+    await updQ($, q =>
       q.claim?.token === token
         ? { ...q, claim: null }
         : { ...q, recovery: q.recovery.filter(r => r.token !== token) },
     )
     return
   }
-  const before = await read($, queue)
+  const before = await getQ($)
   const entry = before.claim?.token === token ? before.claim.entry : before.recovery.find(r => r.token === token)
   if (entry === undefined) return
   const isBack = await handBack($, [entry.text])
   let where: 'box' | 'queue' | 'recovery' = 'box'
-  await update($, queue, q => {
+  await updQ($, q => {
     if (q.claim?.token === token) {
       where = isBack ? 'box' : 'queue'
       return isBack
@@ -164,7 +197,7 @@ async function settleRelease($: EngineInterface, token: string, failure: string 
 async function adoptOnLoad($: EngineInterface): Promise<void> {
   const oldHeld = await read($, legacyHeld)
   const oldRunning = await read($, legacyRunningTurn)
-  await update($, queue, q => {
+  await updQ($, q => {
     let next = q
     if (oldHeld.length > 0) {
       next = {
@@ -191,15 +224,17 @@ const STALE_RELEASE = 'Queued before /clear; not sent into the new conversation 
 // Admit it only while it is still the current conversation's claim; a release
 // /clear or a reload moved to recovery is refused there and stays recoverable.
 async function admitOwnRelease($: EngineInterface, text: string): Promise<boolean> {
-  const q = await read($, queue)
+  const q = await getQ($)
   if (q.claim !== null && q.claim.entry.text === text && q.claim.epoch === q.epoch) return true
-  if (!q.recovery.some(r => r.token !== undefined && r.text === text)) return true
-  // Refused here, so it is known unsent: drop the "may already have been
-  // sent" mark (after a reload no callback is left to do it).
-  await update($, queue, s => ({
-    ...s,
-    recovery: s.recovery.map(r => (r.token !== undefined && r.text === text ? { seq: r.seq, text: r.text } : r)),
-  }))
+  // Refused here, so it is known unsent. Keep it under Not sent: drop the "may
+  // already have been sent" mark if it is there (after a reload no callback is
+  // left to do it), or add it if nothing remembers it (a reload lost the
+  // /clear carry).
+  await updQ($, s =>
+    s.recovery.some(r => r.token !== undefined && r.text === text)
+      ? { ...s, recovery: s.recovery.map(r => (r.token !== undefined && r.text === text ? { seq: r.seq, text: r.text } : r)) }
+      : { ...s, nextSeq: s.nextSeq + 1, recovery: [...s.recovery, { seq: s.nextSeq, text }] },
+  )
   return false
 }
 
@@ -237,7 +272,7 @@ function held(message: string): { drop: string } {
 // /queue and its alias /defer.
 async function runQueue($: EngineInterface, args: string): Promise<{ text: string }> {
   const body = args.trim()
-  if (body === '') return { text: `${USAGE}\n\n${listText(await read($, queue))}` }
+  if (body === '') return { text: `${USAGE}\n\n${listText(await getQ($))}` }
   const entries = splitQueuedMessages(body)
   if (entries.some(isCommandLike)) return { text: CANT_QUEUE_COMMAND }
   return { text: await queueEntries($, entries) }
@@ -245,7 +280,7 @@ async function runQueue($: EngineInterface, args: string): Promise<{ text: strin
 
 async function takeAllItems($: EngineInterface): Promise<Entry[]> {
   let taken: Entry[] = []
-  await update($, queue, q => {
+  await updQ($, q => {
     taken = q.items
     return { ...q, items: [], paused: false }
   })
@@ -255,7 +290,7 @@ async function takeAllItems($: EngineInterface): Promise<Entry[]> {
 async function takeBackAll($: EngineInterface): Promise<void> {
   const taken = await takeAllItems($)
   if (await handBack($, taken.map(m => m.text))) return
-  await update($, queue, q => ({ ...q, items: insertBySeq(q.items, taken) }))
+  await updQ($, q => ({ ...q, items: insertBySeq(q.items, taken) }))
   toast($, 'Could not reach the prompt box; kept the queued prompts')
 }
 
@@ -263,17 +298,17 @@ async function takeBackAll($: EngineInterface): Promise<void> {
 // left running.
 async function takeBackNewest($: EngineInterface): Promise<void> {
   let taken: Entry | undefined
-  await update($, queue, q => {
+  await updQ($, q => {
     taken = q.items.at(-1)
     return taken === undefined ? q : { ...q, items: q.items.slice(0, -1) }
   })
   if (taken === undefined) return
   const entry = taken
   if (await handBack($, [entry.text])) {
-    await update($, queue, q => (q.items.length === 0 ? { ...q, paused: false } : q))
+    await updQ($, q => (q.items.length === 0 ? { ...q, paused: false } : q))
     return
   }
-  await update($, queue, q => ({ ...q, items: insertBySeq(q.items, [entry]) }))
+  await updQ($, q => ({ ...q, items: insertBySeq(q.items, [entry]) }))
   toast($, 'Could not reach the prompt box; kept the queued prompt')
 }
 
@@ -284,7 +319,7 @@ async function restoreAfterAbort($: EngineInterface): Promise<void> {
   const taken = await takeAllItems($)
   if (taken.length === 0) return
   if (await handBack($, taken.map(m => m.text))) return
-  await update($, queue, q => ({ ...q, items: insertBySeq(q.items, taken), paused: true }))
+  await updQ($, q => ({ ...q, items: insertBySeq(q.items, taken), paused: true }))
   toast($, `Turn interrupted; could not reach the prompt box, so ${taken.length} queued prompt(s) wait, paused`)
 }
 
@@ -293,13 +328,15 @@ async function restoreAfterAbort($: EngineInterface): Promise<void> {
 // instead, so nothing is lost. The epoch bump cancels sends scheduled before
 // it, and an unsettled release moves to recovery (it may land, or not). What
 // the box can't take goes to recovery too: never sent by the mod.
-async function resetForNewConversation($: EngineInterface, why: 'clear' | 'resume'): Promise<void> {
+async function resetForNewConversation($: EngineInterface, why: 'clear' | 'resume', sessionId: string): Promise<void> {
   let taken: Entry[] = []
-  await update($, queue, q => {
+  const after = await updQ($, q => {
     taken = q.items
     const recovery = q.claim === null ? q.recovery : [...q.recovery, { ...q.claim.entry, token: q.claim.token, maybeSent: true as const }]
     return { ...q, epoch: q.epoch + 1, runningTurn: null, items: [], claim: null, paused: false, recovery }
   })
+  // This session's state is gone once the new one starts; carry what matters.
+  carry = { from: sessionId, value: after }
   if (taken.length === 0) return
   const label = why === 'clear' ? '/clear' : 'Resume'
   if (await handBack($, taken.map(m => m.text))) {
@@ -307,23 +344,27 @@ async function resetForNewConversation($: EngineInterface, why: 'clear' | 'resum
     return
   }
   const kept = taken
-  await update($, queue, q => ({ ...q, recovery: [...q.recovery, ...kept] }))
+  const withKept = (q: Queue): Queue => mergeCarry(q, { ...EMPTY, recovery: kept })
+  // Into both: the carry (this session's state is going) and the state (in
+  // case it isn't, as when the engine keeps it). mergeCarry keeps each once.
+  if (carry !== null && carry.from === sessionId) carry = { from: sessionId, value: withKept(carry.value) }
+  await update($, queue, withKept)
   toast($, `${label}: could not reach the prompt box; kept ${kept.length} queued prompt(s) under "Not sent" (/queue lists them)`)
 }
 
 async function takeBackRecovery($: EngineInterface): Promise<void> {
-  const { recovery } = await read($, queue)
+  const { recovery } = await getQ($)
   if (recovery.length === 0) return
   if (!(await handBack($, recovery.map(m => m.text)))) {
     toast($, 'Could not reach the prompt box; kept them under "Not sent"')
     return
   }
   const seqs = new Set(recovery.map(m => m.seq))
-  await update($, queue, q => ({ ...q, recovery: q.recovery.filter(m => !seqs.has(m.seq)) }))
+  await updQ($, q => ({ ...q, recovery: q.recovery.filter(m => !seqs.has(m.seq)) }))
 }
 
 async function dropRecovery($: EngineInterface): Promise<void> {
-  await update($, queue, q => ({ ...q, recovery: [] }))
+  await updQ($, q => ({ ...q, recovery: [] }))
 }
 
 export const register: Register = (on, options) => {
@@ -365,7 +406,7 @@ export const register: Register = (on, options) => {
     if (entries.length === 0) return { drop: USAGE }
     if (entries.some(isCommandLike)) return { drop: CANT_QUEUE_COMMAND }
     if (!isMidTurn) {
-      const q = await read($, queue)
+      const q = await getQ($)
       const [first, ...rest] = entries
       if (first !== undefined && q.runningTurn === null && q.items.length === 0 && q.claim === null && !q.paused) {
         // Nothing waits: the first entry goes through as the person's own
@@ -380,7 +421,7 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     // Subagent and teammate runs raise turn.start too; only the main loop counts.
-    if (e.agentId === undefined) await update($, queue, q => ({ ...q, runningTurn: e.turnId }))
+    if (e.agentId === undefined) await updQ($, q => ({ ...q, runningTurn: e.turnId }))
     return next(e)
   })
 
@@ -390,7 +431,7 @@ export const register: Register = (on, options) => {
       // end of an older turn, or a repeat, must not mark a newer one idle or
       // release another prompt.
       let isOurs = false
-      await update($, queue, q => {
+      await updQ($, q => {
         isOurs = q.runningTurn === e.turnId
         return isOurs ? { ...q, runningTurn: null } : q
       })
@@ -403,7 +444,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear' || e.reason === 'resume') await resetForNewConversation($, e.reason)
+    if (e.reason === 'clear' || e.reason === 'resume') await resetForNewConversation($, e.reason, e.sessionId)
     return next(e)
   })
 
@@ -412,7 +453,9 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || e.props.view.agentId !== undefined) return next(e)
-    const q = await read($, queue)
+    // A render may not write state, so a pending /clear carry is shown merged.
+    const stored = await read($, queue)
+    const q = carry === null ? stored : mergeCarry(stored, carry.value)
     const list = q.items
     const kept = q.recovery
     if (list.length === 0 && kept.length === 0) return next(e)

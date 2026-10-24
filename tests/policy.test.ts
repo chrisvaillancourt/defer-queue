@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { appendText, parseQueueShorthand, splitQueuedMessages } from '../hooks/policy'
+import { EMPTY, appendText, mergeCarry, parseQueueShorthand, splitQueuedMessages } from '../hooks/policy'
 
 describe('the -> and => shorthand', () => {
   test('takes the body after either prefix', () => {
@@ -55,5 +55,17 @@ describe('the prompt box text', () => {
   test('appends entries after the draft with blank lines between', () => {
     expect(appendText(['a', 'b'], true)).toBe('\n\na\n\nb')
     expect(appendText(['a'], false)).toBe('a')
+  })
+})
+
+describe('carrying the queue across /clear', () => {
+  test('merges Not sent once by seq and only raises epoch and nextSeq', () => {
+    const carried = { ...EMPTY, epoch: 3, nextSeq: 9, recovery: [{ seq: 4, text: 'old', token: 't', maybeSent: true as const }] }
+    const fresh = { ...EMPTY, recovery: [{ seq: 4, text: 'old' }] }
+    const merged = mergeCarry(fresh, carried)
+    expect(merged.epoch).toBe(3)
+    expect(merged.nextSeq).toBe(9)
+    expect(merged.recovery).toEqual([{ seq: 4, text: 'old' }])
+    expect(mergeCarry(merged, carried)).toEqual(merged)
   })
 })

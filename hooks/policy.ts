@@ -12,6 +12,21 @@ export const EMPTY: Queue = {
   recovery: [],
 }
 
+/**
+ * Folds what a /clear carried over into the new session's queue. Idempotent:
+ * recovery entries are kept once by `seq`, epoch and nextSeq only grow.
+ */
+export function mergeCarry(q: Queue, carried: Queue): Queue {
+  const bySeq = new Map<number, Queue['recovery'][number]>()
+  for (const r of [...carried.recovery, ...q.recovery]) bySeq.set(r.seq, r)
+  return {
+    ...q,
+    epoch: Math.max(q.epoch, carried.epoch),
+    nextSeq: Math.max(q.nextSeq, carried.nextSeq),
+    recovery: [...bySeq.values()].sort((a, b) => a.seq - b.seq),
+  }
+}
+
 /** Puts entries back in `seq` order, so a returned entry lands ahead of newer ones. */
 export function insertBySeq(items: readonly Entry[], back: readonly Entry[]): Entry[] {
   return [...items, ...back].sort((a, b) => a.seq - b.seq)
