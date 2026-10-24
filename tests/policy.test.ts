@@ -1,6 +1,18 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { EMPTY, appendText, mergeCarry, parseQueueShorthand, splitQueuedMessages } from '../hooks/policy'
+import {
+  EMPTY,
+  abandonInFlight,
+  appendText,
+  keepUnsent,
+  mergeCarry,
+  ownerOf,
+  parseQueueShorthand,
+  resetQueue,
+  settleHandback,
+  splitQueuedMessages,
+} from '../hooks/policy'
+import type { Queue } from '../types'
 
 describe('the -> and => shorthand', () => {
   test('takes the body after either prefix', () => {
@@ -67,5 +79,95 @@ describe('carrying the queue across /clear', () => {
     expect(merged.nextSeq).toBe(9)
     expect(merged.recovery).toEqual([{ seq: 4, text: 'old' }])
     expect(mergeCarry(merged, carried)).toEqual(merged)
+  })
+})
+
+describe('which record owns the queue', () => {
+  const table: [string | undefined, string | undefined, ReturnType<typeof ownerOf>][] = [
+    [undefined, 's1', 'state'],
+    [undefined, undefined, 'state'],
+    ['s1', 's1', 'carry'],
+    ['s1', undefined, 'carry'],
+    ['s1', 's2', 'adopt'],
+  ]
+  for (const [from, id, owner] of table) {
+    test(`carry from ${from ?? 'none'}, session ${id ?? 'unknown'}: ${owner}`, () => {
+      expect(ownerOf(from, id)).toBe(owner)
+    })
+  }
+})
+
+// (event x record) -> record, as the hooks apply them to the owner.
+const A = { seq: 1, text: 'A' }
+const B = { seq: 2, text: 'B' }
+const C = { seq: 3, text: 'C' }
+const pendingB = { id: 'h1', epoch: 0, entries: [B], wasPaused: false, pauseOnFail: false }
+
+describe('the /clear reset', () => {
+  test('bumps the epoch, takes the queue, keeps a release as maybe sent, keeps handbacks pending', () => {
+    const q: Queue = {
+      ...EMPTY,
+      nextSeq: 4,
+      runningTurn: 't1',
+      items: [A],
+      claim: { entry: C, token: 'r1', epoch: 0 },
+      paused: true,
+      pending: [pendingB],
+    }
+    const { next, taken } = resetQueue(q)
+    expect(taken).toEqual([A])
+    expect(next).toEqual({
+      ...EMPTY,
+      epoch: 1,
+      nextSeq: 4,
+      recovery: [{ ...C, token: 'r1', maybeSent: true }],
+      pending: [pendingB],
+    })
+  })
+})
+
+describe('settling a handback by id', () => {
+  const rows: [string, Queue, boolean, Queue, 'box' | 'queue' | 'recovery'][] = [
+    ['filled, same epoch', { ...EMPTY, paused: true, pending: [pendingB] }, true, { ...EMPTY, pending: [] }, 'box'],
+    ['filled, same epoch, others still queued', { ...EMPTY, items: [A], paused: true, pending: [pendingB] }, true, { ...EMPTY, items: [A], paused: true }, 'box'],
+    ['filled after /clear', { ...EMPTY, epoch: 1, paused: true, pending: [pendingB] }, true, { ...EMPTY, epoch: 1, paused: true }, 'box'],
+    ['refused, same epoch', { ...EMPTY, items: [C], pending: [pendingB] }, false, { ...EMPTY, items: [B, C] }, 'queue'],
+    ['refused, same epoch, interrupt', { ...EMPTY, items: [C], pending: [{ ...pendingB, pauseOnFail: true }] }, false, { ...EMPTY, items: [B, C], paused: true }, 'queue'],
+    ['refused after /clear', { ...EMPTY, epoch: 1, pending: [pendingB] }, false, { ...EMPTY, epoch: 1, recovery: [B] }, 'recovery'],
+    ['refused, record gone (reload)', { ...EMPTY, epoch: 1, recovery: [{ ...B, maybeSent: true }] }, false, { ...EMPTY, epoch: 1, recovery: [{ ...B, maybeSent: true }] }, 'recovery'],
+    ['filled, record gone', { ...EMPTY, items: [A] }, true, { ...EMPTY, items: [A] }, 'box'],
+  ]
+  for (const [name, before, isFilled, after, where] of rows) {
+    test(name, () => {
+      const settled = settleHandback(before, 'h1', isFilled, [B])
+      expect(settled.next).toEqual(after)
+      expect(settled.where).toBe(where)
+      // Never both pending and Not sent, never pending once settled.
+      expect(settled.next.pending.some(p => p.id === 'h1')).toBe(false)
+    })
+  }
+
+  test('settling twice changes nothing more', () => {
+    const once = settleHandback({ ...EMPTY, epoch: 1, pending: [pendingB] }, 'h1', false, [B]).next
+    expect(settleHandback(once, 'h1', false, [B]).next).toEqual(once)
+  })
+})
+
+describe('on load', () => {
+  test('moves handbacks and a release a gone module left to Not sent, and pauses', () => {
+    const q: Queue = { ...EMPTY, items: [A], claim: { entry: C, token: 'r1', epoch: 0 }, pending: [pendingB] }
+    expect(abandonInFlight(q)).toEqual({
+      ...EMPTY,
+      items: [A],
+      paused: true,
+      recovery: [B, { ...C, token: 'r1', maybeSent: true }],
+    })
+    expect(abandonInFlight({ ...EMPTY, items: [A] })).toEqual({ ...EMPTY, items: [A] })
+  })
+
+  test('keepUnsent keeps each entry once', () => {
+    const once = keepUnsent(EMPTY, [A, B])
+    expect(keepUnsent(once, [B])).toEqual(once)
+    expect(once.recovery).toEqual([A, B])
   })
 })

@@ -5,11 +5,16 @@ import {
   EMPTY,
   USAGE,
   firstLine,
+  abandonInFlight,
   insertBySeq,
   isCommandLike,
   appendText,
+  keepUnsent,
   listText,
   mergeCarry,
+  ownerOf,
+  resetQueue,
+  settleHandback,
   parseQueueShorthand,
   splitQueuedMessages,
 } from './policy'
@@ -25,28 +30,71 @@ const legacyRunningTurn = atom({ plugin: 'defer-queue', key: 'runningTurn' } as 
 
 // Live on 2.1.310, $.state is held per session id and /clear starts a new
 // one, so the queue reads empty after it. What must outlive the /clear (the
-// bumped epoch, Not sent) is carried in this module variable from session.end
-// and merged into the new session's state by a timer session.end starts
-// (live, 2.1.310: it fires in the new session, about 20 ms later), or by any
-// access before that. A reload inside that moment loses the carry (module
-// variables don't survive one); README lists it.
+// bumped epoch, Not sent, handbacks still in flight) is the carry: from
+// session.end it is the queue's one current record, the one every change
+// applies to, until it is adopted into the new session's state. A timer
+// session.end starts adopts it (live, 2.1.310: it fires in the new session,
+// about 20 ms later); any access before that adopts it too. Changes are
+// mirrored into the old session's state while it is current, for an engine
+// that keeps it. A reload before adoption loses the carry (module variables
+// don't survive one); README lists it.
 let carry: { from: string; value: Queue } | null = null
+
+// Every state access runs one at a time, so a carry is created, changed and
+// adopted whole: no access reads the new session's state half adopted, and
+// none lands in the old one after the carry was taken from it.
+let accessChain: Promise<unknown> = Promise.resolve()
+
+function serially<T>(step: () => Promise<T>): Promise<T> {
+  const run = accessChain.then(step)
+  accessChain = run.catch(() => undefined)
+  return run
+}
+
+async function currentSessionId($: EngineInterface): Promise<string | undefined> {
+  try {
+    return await $.session.id()
+  } catch {
+    return undefined
+  }
+}
+
+// Applies a change to the record that owns the queue now. Callers hold the
+// chain (serially).
+async function applyToOwner($: EngineInterface, change: (q: Queue) => Queue): Promise<Queue> {
+  const c = carry
+  if (c === null) return update($, queue, change)
+  if (ownerOf(c.from, await currentSessionId($)) === 'carry') {
+    c.value = change(c.value)
+    try {
+      await update($, queue, q => (carry === c ? c.value : q))
+    } catch {
+      // The mirror is best effort: the carry is the record.
+    }
+    return c.value
+  }
+  const adopted = await update($, queue, q => change(mergeCarry(q, c.value)))
+  if (carry === c) carry = null
+  return adopted
+}
+
+async function getQ($: EngineInterface): Promise<Queue> {
+  return serially(() => (carry === null ? read($, queue) : applyToOwner($, q => q)))
+}
+
+async function updQ($: EngineInterface, change: (q: Queue) => Queue): Promise<Queue> {
+  return serially(() => applyToOwner($, change))
+}
 
 // Resolves whether nothing is left to carry.
 async function adoptCarry($: EngineInterface): Promise<boolean> {
-  const c = carry
-  if (c === null) return true
-  let id: string
-  try {
-    id = await $.session.id()
-  } catch {
-    return false
-  }
-  if (carry !== c) return carry === null
-  if (id === c.from) return false
-  carry = null
-  await update($, queue, q => mergeCarry(q, c.value))
-  return true
+  return serially(async () => {
+    const c = carry
+    if (c === null) return true
+    if (ownerOf(c.from, await currentSessionId($)) !== 'adopt') return false
+    await applyToOwner($, q => q)
+    return carry === null
+  })
 }
 
 // The timer's waits: the first try is the next tick; later ones cover an
@@ -63,16 +111,6 @@ async function retryAdoption($: EngineInterface, attempt: number): Promise<void>
   // A timer never throws: a failed try is retried, and any access adopts too.
   const isDone = await adoptCarry($).catch(() => false)
   if (!isDone) scheduleAdoption($, attempt + 1)
-}
-
-async function getQ($: EngineInterface): Promise<Queue> {
-  await adoptCarry($)
-  return read($, queue)
-}
-
-async function updQ($: EngineInterface, change: (q: Queue) => Queue): Promise<Queue> {
-  await adoptCarry($)
-  return update($, queue, change)
 }
 
 const BAND_ROWS = 5
@@ -229,16 +267,8 @@ async function adoptOnLoad($: EngineInterface): Promise<void> {
     // 0.1's runningTurn is not adopted: 0.1 set it on every turn.start,
     // subagents' included, so it can name a finished one. The next main
     // turn.start sets the real one; until then the queue counts as idle.
-    if (next.pending.length > 0) {
-      // Handbacks a reload interrupted: whether the box took them is unknown,
-      // so they are kept under Not sent rather than queued again.
-      next = mergeCarry({ ...next, pending: [] }, { ...EMPTY, recovery: next.pending.flatMap(p => p.entries) })
-    }
-    if (next.claim !== null) {
-      const { entry, token } = next.claim
-      next = { ...next, claim: null, paused: true, recovery: [...next.recovery, { ...entry, token, maybeSent: true }] }
-    }
-    return next
+    // Handbacks and a release a reload interrupted go under Not sent.
+    return abandonInFlight(next)
   })
   if (oldHeld.length > 0) await update($, legacyHeld, () => [])
   if (oldRunning !== null) await update($, legacyRunningTurn, () => null)
@@ -340,27 +370,13 @@ async function handBackFromQueue(
   if (taken.length === 0) return 'none'
   const entries = taken
   const isBack = await handBack($, entries.map(m => m.text))
+  // Settled by id in whichever record owns the queue now: this session's
+  // state, the /clear carry, or the new session's state that adopted it.
   let where: 'box' | 'queue' | 'recovery' = 'box'
   await updQ($, q => {
-    const mine = q.pending.find(p => p.id === id)
-    const pending = q.pending.filter(p => p.id !== id)
-    if (isBack) {
-      where = 'box'
-      return { ...q, pending, paused: q.items.length === 0 ? false : q.paused }
-    }
-    if (mine === undefined || mine.epoch !== q.epoch) {
-      // A /clear came since (or a reload lost the record): old input never
-      // re-enters the new conversation's queue.
-      where = 'recovery'
-      return mergeCarry({ ...q, pending }, { ...EMPTY, recovery: mine?.entries ?? entries })
-    }
-    where = 'queue'
-    return {
-      ...q,
-      pending,
-      items: insertBySeq(q.items, mine.entries),
-      paused: q.paused || mine.wasPaused || mine.pauseOnFail,
-    }
+    const settled = settleHandback(q, id, isBack, entries)
+    where = settled.where
+    return settled.next
   })
   return where
 }
@@ -396,13 +412,16 @@ async function restoreAfterAbort($: EngineInterface): Promise<void> {
 // the box can't take goes to recovery too: never sent by the mod.
 async function resetForNewConversation($: EngineInterface, why: 'clear' | 'resume', sessionId: string): Promise<void> {
   let taken: Entry[] = []
-  const after = await updQ($, q => {
-    taken = q.items
-    const recovery = q.claim === null ? q.recovery : [...q.recovery, { ...q.claim.entry, token: q.claim.token, maybeSent: true as const }]
-    return { ...q, epoch: q.epoch + 1, runningTurn: null, items: [], claim: null, paused: false, recovery }
+  await serially(async () => {
+    const after = await applyToOwner($, q => {
+      const reset = resetQueue(q)
+      taken = reset.taken
+      return reset.next
+    })
+    // This session's state is gone once the new one starts: from here the
+    // carry is the record, until the new session adopts it.
+    carry = { from: sessionId, value: after }
   })
-  // This session's state is gone once the new one starts; carry what matters.
-  carry = { from: sessionId, value: after }
   scheduleAdoption($, 0)
   if (taken.length === 0) return
   const label = why === 'clear' ? '/clear' : 'Resume'
@@ -411,11 +430,7 @@ async function resetForNewConversation($: EngineInterface, why: 'clear' | 'resum
     return
   }
   const kept = taken
-  const withKept = (q: Queue): Queue => mergeCarry(q, { ...EMPTY, recovery: kept })
-  // Into both: the carry (this session's state is going) and the state (in
-  // case it isn't, as when the engine keeps it). mergeCarry keeps each once.
-  if (carry !== null && carry.from === sessionId) carry = { from: sessionId, value: withKept(carry.value) }
-  await update($, queue, withKept)
+  await updQ($, q => keepUnsent(q, kept))
   toast($, `${label}: could not reach the prompt box; kept ${kept.length} queued prompt(s) under "Not sent" (/queue lists them)`)
 }
 

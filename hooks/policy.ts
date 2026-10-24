@@ -29,6 +29,83 @@ export function mergeCarry(q: Queue, carried: Queue): Queue {
   }
 }
 
+// ---- Queue transitions: (event, record) -> record, applied to the record
+// that owns the queue when the event lands (see ownerOf). -------------------
+
+/**
+ * Which record a queue change applies to while a /clear carry exists (`from`
+ * is the session it left). Before the engine switches session ids the carry
+ * owns the queue; once the id differs it is adopted into the new session's
+ * state, and the change applies there. No carry: the session's state.
+ */
+export function ownerOf(carryFrom: string | undefined, sessionId: string | undefined): 'state' | 'carry' | 'adopt' {
+  if (carryFrom === undefined) return 'state'
+  return sessionId === undefined || sessionId === carryFrom ? 'carry' : 'adopt'
+}
+
+/**
+ * /clear or a resume: the epoch moves on (cancelling sends scheduled before
+ * it), queued entries leave for the prompt box (`taken`), and an unsettled
+ * release is kept under Not sent, marked "may already have been sent".
+ * Handbacks in flight stay in `pending`, to be settled by id.
+ */
+export function resetQueue(q: Queue): { next: Queue; taken: Entry[] } {
+  const recovery = q.claim === null ? q.recovery : [...q.recovery, { ...q.claim.entry, token: q.claim.token, maybeSent: true as const }]
+  return {
+    next: { ...q, epoch: q.epoch + 1, runningTurn: null, items: [], claim: null, paused: false, recovery },
+    taken: q.items,
+  }
+}
+
+/** Entries nothing will send on its own: kept under Not sent, once each by `seq`. */
+export function keepUnsent(q: Queue, entries: readonly Entry[]): Queue {
+  return entries.length === 0 ? q : mergeCarry(q, { ...EMPTY, recovery: [...entries] })
+}
+
+/**
+ * The prompt box answered the handback `id`. Filled: it leaves `pending`.
+ * Refused: back to its place in the queue with the pause it had (or paused,
+ * for an interrupt), unless the epoch moved since it left (a /clear), when it
+ * goes under Not sent; never both pending and Not sent. `entries` stands in
+ * for a record a reload already settled.
+ */
+export function settleHandback(
+  q: Queue,
+  id: string,
+  isFilled: boolean,
+  entries: readonly Entry[],
+): { next: Queue; where: 'box' | 'queue' | 'recovery' } {
+  const mine = q.pending.find(p => p.id === id)
+  const pending = q.pending.filter(p => p.id !== id)
+  const isCurrent = mine !== undefined && mine.epoch === q.epoch
+  if (isFilled) {
+    const paused = isCurrent && q.items.length === 0 ? false : q.paused
+    return { next: { ...q, pending, paused }, where: 'box' }
+  }
+  if (!isCurrent) {
+    return { next: keepUnsent({ ...q, pending }, mine?.entries ?? entries), where: 'recovery' }
+  }
+  return {
+    next: { ...q, pending, items: insertBySeq(q.items, mine.entries), paused: q.paused || mine.wasPaused || mine.pauseOnFail },
+    where: 'queue',
+  }
+}
+
+/**
+ * On load: what a module that is gone left in flight. Its callbacks died with
+ * it, so whether a handback reached the box, or a release went out, is
+ * unknown: both are kept under Not sent (the release "may already have been
+ * sent"), and an unsettled release pauses the queue.
+ */
+export function abandonInFlight(q: Queue): Queue {
+  let next = q.pending.length === 0 ? q : keepUnsent({ ...q, pending: [] }, q.pending.flatMap(p => p.entries))
+  if (next.claim !== null) {
+    const { entry, token } = next.claim
+    next = { ...next, claim: null, paused: true, recovery: [...next.recovery, { ...entry, token, maybeSent: true }] }
+  }
+  return next
+}
+
 /** Puts entries back in `seq` order, so a returned entry lands ahead of newer ones. */
 export function insertBySeq(items: readonly Entry[], back: readonly Entry[]): Entry[] {
   return [...items, ...back].sort((a, b) => a.seq - b.seq)

@@ -6,6 +6,8 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, PromptFillResult, PromptSubmitResult } from 'claude-code'
 
+import type { Queue } from '../types'
+
 function deferred<T>() {
   let resolve: (value: T) => void = () => {}
   const promise = new Promise<T>(r => {
@@ -141,7 +143,7 @@ describe('prompt box writes', () => {
 
 // Live on 2.1.310, $.state is held per session id, and /clear starts a new
 // one: the plugin's state reads empty after it. This stands in for that.
-function perSessionState(on: On) {
+function perSessionState(on: On, onQueue?: (q: Queue) => void) {
   const stores: Record<string, Map<string, { value: unknown; version: number }>> = {}
   const sid = { value: 's1', stores }
   const store = () => (stores[sid.value] ??= new Map())
@@ -152,6 +154,7 @@ function perSessionState(on: On) {
     const version = store().get(k)?.version ?? 0
     if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
     store().set(k, { value: e.value, version: version + 1 })
+    if (e.plugin === 'defer-queue' && e.key === 'queue') onQueue?.((e.value as { value: Queue }).value)
     return { value: { isSet: true, version: version + 1 } }
   })
   return sid
@@ -234,6 +237,54 @@ describe('the /clear transfer', () => {
     await $.session.start(SESSION)
     expect((await list($)).text).toMatch(/Not sent[\s\S]*RECOVER_ME/)
   })
+})
+
+describe('a handback that settles during /clear', () => {
+  for (const isFilled of [true, false]) {
+    test(`is settled in the record the new conversation adopts (${isFilled ? 'filled' : 'refused'})`, async ($, on) => {
+      const entered = deferred<void>()
+      const gate = deferred<PromptFillResult>()
+      const reset = deferred<void>()
+      let fills = 0
+      const { box, settle } = bottoms(on, () => {
+        if (fills++ > 0) return { isFilled: true }
+        entered.resolve()
+        return gate.promise
+      })
+      const sid = perSessionState(on, q => {
+        if (q.epoch > 0) reset.resolve()
+      })
+      await $.session.start(SESSION)
+      await $.turn.start({ text: 'work', turnId: 't1' })
+      await $.prompt.submit(typed('A'))
+      await $.prompt.submit(typed('B'))
+      const ui = await $.ui.mount(BAND)
+      // Take back B; its fill waits.
+      const taking = ui.press({ key: 'take-back' })
+      await entered.promise
+      // /clear resets the queue (A goes back after B), then B's fill answers
+      // while the old session is still current.
+      const clearing = $.session.end({ reason: 'clear', sessionId: sid.value, resume: { id: sid.value } })
+      await reset.promise
+      await settle()
+      gate.resolve(isFilled ? { isFilled: true } : { isFilled: false, refusal: 'dialog' })
+      await taking
+      await clearing
+      sid.value = `${sid.value}-cleared`
+      await settle()
+      const listed = (await list($)).text ?? ''
+      expect(listed).not.toMatch(/Going back to the prompt box/)
+      if (isFilled) {
+        expect(box.text).toBe('draft\n\nB\n\nA')
+        // A reload must not turn a settled handback into a Not sent entry.
+        await $.session.start(SESSION)
+        expect((await list($)).text).not.toMatch(/Not sent/)
+      } else {
+        expect(box.text).toBe('draft\n\nA')
+        expect(listed).toMatch(/Not sent[\s\S]*B/)
+      }
+    })
+  }
 })
 
 describe('pause safety', () => {
