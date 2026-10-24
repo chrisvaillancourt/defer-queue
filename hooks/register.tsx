@@ -18,8 +18,8 @@ import type { Entry, Queue } from '../types'
 // The whole queue in one record (see AGENTS.md). Change the shape tag when
 // Queue's fields change: a value an older version stored then reads as EMPTY.
 const queue = atom({ plugin: 'defer-queue', key: 'queue' } as const, EMPTY, { shape: 'queue-2' })
-// 0.1's keys, emptied into `queue` once on session.start so an upgrade
-// mid-session keeps what was held.
+// 0.1's keys, emptied on session.start; its held prompts move into `queue`
+// so an upgrade mid-session keeps them.
 const legacyHeld = atom({ plugin: 'defer-queue', key: 'held' } as const, [])
 const legacyRunningTurn = atom({ plugin: 'defer-queue', key: 'runningTurn' } as const, null)
 
@@ -206,7 +206,9 @@ async function adoptOnLoad($: EngineInterface): Promise<void> {
         items: [...next.items, ...oldHeld.map((m, i) => ({ seq: next.nextSeq + i, text: m.text }))],
       }
     }
-    if (next.runningTurn === null && oldRunning !== null) next = { ...next, runningTurn: oldRunning }
+    // 0.1's runningTurn is not adopted: 0.1 set it on every turn.start,
+    // subagents' included, so it can name a finished one. The next main
+    // turn.start sets the real one; until then the queue counts as idle.
     if (next.pending.length > 0) {
       // Handbacks a reload interrupted: whether the box took them is unknown,
       // so they are kept under Not sent rather than queued again.

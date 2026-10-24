@@ -309,3 +309,19 @@ describe('handbacks in flight across /clear', () => {
     expect((await list($)).text).toMatch(/Not sent[\s\S]*OLD-A/)
   })
 })
+
+describe('upgrading from 0.1', () => {
+  test("keeps 0.1's held prompts but not its turn id, which may name a finished subagent", async ($, on) => {
+    const { sent, settle } = bottoms(on)
+    on('state.get', ($, e, next) => {
+      if (e.plugin === 'defer-queue' && e.key === 'held') return { value: { value: [{ id: 'legacy-1', text: 'LEGACY_A' }], version: 1 } }
+      if (e.plugin === 'defer-queue' && e.key === 'runningTurn') return { value: { value: 'already-finished-child', version: 1 } }
+      return next(e)
+    })
+    await $.session.start(SESSION)
+    const result = await $.command.run({ command: 'queue', args: 'NEW_B', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+    await settle()
+    expect(result.text).not.toMatch(/until Claude finishes this turn/)
+    expect(sent).toEqual(['LEGACY_A'])
+  })
+})
