@@ -617,6 +617,30 @@ describe('when a release fails', () => {
   })
 })
 
+describe('a release refused at admission', () => {
+  test('never leaves its claim blocking later sends', async ($, on) => {
+    const gate = deferred<PromptSubmitResult>()
+    let calls = 0
+    const { submitted, settle } = bottoms(on, text => (calls++ === 0 ? gate.promise : { text }))
+    await $.session.start(SESSION)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('first', true))
+    await $.prompt.submit(typedMidTurn('second', true))
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    // An admission this module can't match to its release is refused; the
+    // release it answers for must still finish.
+    const odd = await $.prompt.submit({ text: 'first, rewritten', wait: false, origin: { kind: 'plugin', name: 'defer-queue', asUser: true } })
+    expect(odd.drop).toBeDefined()
+    gate.resolve(odd)
+    await settle()
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, isWorking: false } })
+    await ui.press({ key: 'send' })
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['first', 'second'])
+  })
+})
+
 describe('one release at a time', () => {
   test('a second finished turn while a release is in flight sends nothing more', async ($, on) => {
     const gate = deferred<PromptSubmitResult>()

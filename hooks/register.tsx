@@ -6,9 +6,11 @@ import {
   USAGE,
   firstLine,
   abandonInFlight,
+  admitsRelease,
   insertBySeq,
   isCommandLike,
   appendText,
+  keepRefusedRelease,
   keepUnsent,
   listText,
   mergeCarry,
@@ -124,6 +126,24 @@ const isPersons = (origin: PromptOrigin) => origin.kind === 'composer' || origin
 let lastToken = 0
 const newToken = () => `${Date.now()}-${(lastToken += 1)}`
 
+// Releases submitted and not yet admitted, oldest first. The engine admits a
+// plugin's prompts in order, so an admission is matched to one of these by
+// order, and by text only to prefer an exact match: a hook above may rewrite
+// the text, and $.prompt.submit carries no id. A reload empties it, and any
+// admission it can't match is refused.
+const awaitingAdmission: { token: string; text: string }[] = []
+
+function matchAdmission(text: string): string | undefined {
+  const exact = awaitingAdmission.findIndex(r => r.text === text)
+  const [match] = awaitingAdmission.splice(exact === -1 ? 0 : exact, 1)
+  return match?.token
+}
+
+function forgetAdmission(token: string): void {
+  const i = awaitingAdmission.findIndex(r => r.token === token)
+  if (i !== -1) awaitingAdmission.splice(i, 1)
+}
+
 /** Queues texts at the back. `turnId`, when given, is a running main turn the engine attests. */
 async function hold($: EngineInterface, texts: readonly string[], turnId?: string): Promise<Queue> {
   return updQ($, q => ({
@@ -189,9 +209,10 @@ async function releaseNext($: EngineInterface, why: 'auto' | 'explicit', epoch?:
     return { ...q, items: q.items.slice(1), claim: { entry: head, token, epoch: q.epoch }, paused: false }
   })
   if (sending === undefined) return
+  awaitingAdmission.push({ token, text: sending.text })
   void $.prompt.submit({ text: sending.text, asUser: true }).then(
-    result => settleRelease($, token, result.drop === undefined ? undefined : `dropped: ${result.drop}`),
-    (error: unknown) => settleRelease($, token, String(error)),
+    result => (forgetAdmission(token), settleRelease($, token, result.drop === undefined ? undefined : `dropped: ${result.drop}`)),
+    (error: unknown) => (forgetAdmission(token), settleRelease($, token, String(error))),
   )
 }
 
@@ -201,9 +222,10 @@ async function releaseNext($: EngineInterface, why: 'auto' | 'explicit', epoch?:
 // take it, it returns to its place in the queue and the queue pauses, so a
 // failed release never starts another.
 async function settleRelease($: EngineInterface, token: string, failure: string | undefined): Promise<void> {
-  if (failure === `dropped: ${STALE_RELEASE}`) {
+  if (failure === `dropped: ${STALE_RELEASE}` && (await getQ($)).claim?.token !== token) {
     // Refused at admission (see admitOwnRelease): it was not sent, and it
-    // belongs to the old conversation, so it stays under Not sent.
+    // belongs to the old conversation, so it stays under Not sent. Refused
+    // while still the claim, it is finished below like any failed release.
     await updQ($, q => ({
       ...q,
       recovery: q.recovery.map(r => (r.token === token ? { seq: r.seq, text: r.text } : r)),
@@ -274,24 +296,16 @@ async function adoptOnLoad($: EngineInterface): Promise<void> {
   if (oldRunning !== null) await update($, legacyRunningTurn, () => null)
 }
 
-const STALE_RELEASE = 'Queued before /clear; not sent into the new conversation (kept under "Not sent")'
+const STALE_RELEASE = 'Queued before /clear or a reload; not sent into the new conversation (kept under "Not sent")'
 
 // The mod's own release passes through prompt.submit when the engine admits
 // it, which (live, 2.1.310) can be after a /clear that ran while it waited.
 // Admit it only while it is still the current conversation's claim; a release
 // /clear or a reload moved to recovery is refused there and stays recoverable.
 async function admitOwnRelease($: EngineInterface, text: string): Promise<boolean> {
-  const q = await getQ($)
-  if (q.claim !== null && q.claim.entry.text === text && q.claim.epoch === q.epoch) return true
-  // Refused here, so it is known unsent. Keep it under Not sent: drop the "may
-  // already have been sent" mark if it is there (after a reload no callback is
-  // left to do it), or add it if nothing remembers it (a reload lost the
-  // /clear carry).
-  await updQ($, s =>
-    s.recovery.some(r => r.token !== undefined && r.text === text)
-      ? { ...s, recovery: s.recovery.map(r => (r.token !== undefined && r.text === text ? { seq: r.seq, text: r.text } : r)) }
-      : { ...s, nextSeq: s.nextSeq + 1, recovery: [...s.recovery, { seq: s.nextSeq, text }] },
-  )
+  const token = matchAdmission(text)
+  if (admitsRelease(await getQ($), token)) return true
+  await updQ($, q => keepRefusedRelease(q, token, text))
   return false
 }
 

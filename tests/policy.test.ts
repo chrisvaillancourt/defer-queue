@@ -3,7 +3,9 @@ import { describe, expect, test } from 'claude-code/testing'
 import {
   EMPTY,
   abandonInFlight,
+  admitsRelease,
   appendText,
+  keepRefusedRelease,
   keepUnsent,
   mergeCarry,
   ownerOf,
@@ -169,5 +171,28 @@ describe('on load', () => {
     const once = keepUnsent(EMPTY, [A, B])
     expect(keepUnsent(once, [B])).toEqual(once)
     expect(once.recovery).toEqual([A, B])
+  })
+})
+
+describe('admitting an own release', () => {
+  const claimed: Queue = { ...EMPTY, epoch: 1, claim: { entry: A, token: 'r2', epoch: 1 } }
+  const rows: [string, Queue, string | undefined, boolean][] = [
+    ['the current claim', claimed, 'r2', true],
+    ['an older release while a newer claim stands', claimed, 'r1', false],
+    ['an admission nothing in flight matches (a reload)', claimed, undefined, false],
+    ['no claim (a /clear moved it)', { ...EMPTY, epoch: 1 }, 'r1', false],
+  ]
+  for (const [name, q, token, admits] of rows) {
+    test(name, () => expect(admitsRelease(q, token)).toBe(admits))
+  }
+
+  test('a refusal keeps the release under Not sent, known unsent', () => {
+    const moved: Queue = { ...EMPTY, epoch: 1, nextSeq: 5, recovery: [{ ...A, token: 'r1', maybeSent: true }] }
+    expect(keepRefusedRelease(moved, 'r1', 'A, rewritten').recovery).toEqual([A])
+    // After a reload no token is known: matched by text, else added.
+    expect(keepRefusedRelease(moved, undefined, 'A').recovery).toEqual([A])
+    expect(keepRefusedRelease({ ...EMPTY, nextSeq: 5 }, undefined, 'X').recovery).toEqual([{ seq: 5, text: 'X' }])
+    // A standing claim is left for its settlement to finish.
+    expect(keepRefusedRelease(claimed, 'r2', 'A')).toEqual(claimed)
   })
 })

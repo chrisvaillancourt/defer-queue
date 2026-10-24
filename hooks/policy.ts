@@ -106,6 +106,33 @@ export function abandonInFlight(q: Queue): Queue {
   return next
 }
 
+/**
+ * Whether an own release the engine admits may enter: only while it is the
+ * current conversation's claim. `token` is the release this module matched
+ * the admission to (undefined: none, as after a reload); never its text,
+ * which a hook above may have rewritten.
+ */
+export function admitsRelease(q: Queue, token: string | undefined): boolean {
+  return token !== undefined && q.claim !== null && q.claim.token === token && q.claim.epoch === q.epoch
+}
+
+/**
+ * A refused admission is known unsent: it stays under Not sent without the
+ * "may already have been sent" mark (after a reload no callback is left to
+ * drop it), or is added there if nothing remembers it. A standing claim is
+ * left to its release's settlement, which always finishes it.
+ */
+export function keepRefusedRelease(q: Queue, token: string | undefined, text: string): Queue {
+  const unmark = (match: (r: Queue['recovery'][number]) => boolean): Queue => ({
+    ...q,
+    recovery: q.recovery.map(r => (match(r) ? { seq: r.seq, text: r.text } : r)),
+  })
+  if (token !== undefined && q.recovery.some(r => r.token === token)) return unmark(r => r.token === token)
+  if (token !== undefined && q.claim?.token === token) return q
+  if (q.recovery.some(r => r.token !== undefined && r.text === text)) return unmark(r => r.token !== undefined && r.text === text)
+  return { ...q, nextSeq: q.nextSeq + 1, recovery: [...q.recovery, { seq: q.nextSeq, text }] }
+}
+
 /** Puts entries back in `seq` order, so a returned entry lands ahead of newer ones. */
 export function insertBySeq(items: readonly Entry[], back: readonly Entry[]): Entry[] {
   return [...items, ...back].sort((a, b) => a.seq - b.seq)
