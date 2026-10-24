@@ -182,6 +182,52 @@ describe('releasing held prompts', () => {
     expect(submitted).toEqual([])
   })
 
+  test("a subagent's turn starting does not hide the main turn's end", async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    await $.session.start(SESSION)
+    await startTurn($)
+    await $.turn.start({ text: 'child task', turnId: 'c1', agentId: 'agent-1' })
+    await $.turn.complete(endTurn('answer'))
+    await run($, 'later')
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['later'])
+  })
+
+  test("a subagent's answered turn during the main turn releases nothing", async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('after', true))
+    await $.turn.start({ text: 'child task', turnId: 'c1', agentId: 'agent-1' })
+    await $.turn.complete(endTurn('answer', 'agent-1', 'c1'))
+    await settle()
+    expect(submitted).toEqual([])
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['after'])
+  })
+
+  test("an older turn's late answer releases nothing while a newer turn runs", async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('after', true))
+    await startTurn($, 't2')
+    await $.turn.complete(endTurn('answer', undefined, 't1'))
+    await settle()
+    expect(submitted).toEqual([])
+  })
+
+  test('the same answered turn reported twice releases one prompt', async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('first', true))
+    await $.prompt.submit(typedMidTurn('second', true))
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['first'])
+  })
+
   test('several held prompts go one per finished turn, in order', async ($, on) => {
     const { submitted, settle } = bottoms(on)
     await startTurn($)

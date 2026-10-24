@@ -5,7 +5,7 @@ import type { DeferredPrompt } from '../types'
 
 // Prompts waiting for the main loop's turn to end, oldest first.
 const held = atom({ plugin: 'defer-queue', key: 'held' } as const, [])
-// The main-loop turn running now, by id; subagent runs raise no turn.start.
+// The main-loop turn running now, by id; null while the main loop is idle.
 const runningTurn = atom({ plugin: 'defer-queue', key: 'runningTurn' } as const, null)
 
 // True from a release's submit until its turn starts, so one finished turn
@@ -122,17 +122,24 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
-    await update($, runningTurn, () => e.turnId)
+    // Subagent and teammate runs raise turn.start too; only the main loop counts.
+    if (e.agentId === undefined) await update($, runningTurn, () => e.turnId)
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
-      // A late end of an older turn must not mark a newer one idle.
-      await update($, runningTurn, id => (id === e.turnId ? null : id))
+      // Only the end of the tracked main turn counts, and only once: a late
+      // end of an older turn, or a repeat, must not mark a newer one idle or
+      // release another prompt.
+      let isOurs = false
+      await update($, runningTurn, id => {
+        isOurs = id === e.turnId
+        return isOurs ? null : id
+      })
       // Only a turn the model ended itself counts as finished. After an
       // interrupt, API error or refusal the prompts wait for the next answer.
-      if (e.reason === 'answer') await releaseNext($)
+      if (isOurs && e.reason === 'answer') await releaseNext($)
     }
     return next(e)
   })

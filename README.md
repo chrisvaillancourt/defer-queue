@@ -20,7 +20,7 @@ Set **Defer every mid-turn prompt** (`defer_all_mid_turn`) in `/config` to hold 
 
 - **One per turn.** When a main-conversation turn ends with an answer, the oldest held prompt is sent. Each later one waits for the previous one's turn to finish.
 - **Nothing after Esc, an API error or a refusal.** Held prompts wait for the next turn that ends with an answer, or for **Send next**. `chat:sendNow` and Esc don't flush them, because they aren't in Claude Code's own queue.
-- **Subagent turns don't count.** Their ends release nothing.
+- **Subagent turns don't count.** Their starts and ends are ignored, and only the end of the main turn that is running counts, once. A late or repeated end of an older turn releases nothing.
 - **`/clear` moves them back** to the prompt box. Prompts written for the old conversation aren't sent into the new one.
 - **Exiting the session loses them.** They are kept for the session only.
 
@@ -73,4 +73,4 @@ To uninstall, run `claude plugin uninstall defer-queue@defer-queue`.
 - `claude --plugin-dir .` runs a session with this working copy.
 - To type-check: Claude Code writes `.claude-plugin/types/` (gitignored) whenever it loads the plugin, and `tsconfig.json` extends it, so `tsc -p .` works after one load.
 
-The hooks API is early access and changes between Claude Code releases. This build was written and tested against Claude Code 2.1.294, in the terminal. The desktop app and VS Code may stamp prompts with a different origin, and haven't been tested.
+The hooks API is early access and changes between Claude Code releases. This build was tested against Claude Code 2.1.310, in the terminal (2.1.310 raises `turn.start` for subagent runs too). The desktop app and VS Code may stamp prompts with a different origin, and haven't been tested.
