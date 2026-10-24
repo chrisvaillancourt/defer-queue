@@ -63,7 +63,7 @@ The API is early access and changes between releases; the declarations are the a
 - Don't build on instructions the model can ignore: a gate that "asks" the model to do something first failed live. Enforce in a hook, or give the model the information and let it decide.
 - `/clear` is `session.end` with `reason: 'clear'` and no `session.start` after it: reset per-conversation state there.
 - Subagent and teammate runs raise `turn.start` and `turn.complete` with `agentId` set (2.1.310); a main-loop tracker must filter both.
-
+- A `prompt.submit` hook's `{ drop }` of a typed prompt leaves its text in the prompt box (live, 2.1.310, interactive; 0.1 had the same bug), so the next Enter sends it again. defer-queue clears the box from a `$.clock.after(0)` timer when it still holds exactly the held text.
 ### Bugs that recur in these mods (check every change against them)
 
 Reviews of relay, defer-queue and prewalk kept finding the same family: a boolean flag left stale by a late event (track the running `turnId` instead), a message lost on a path nobody tested (a refused submit, a release racing a new hold), a timer or async step acting for a run that was cancelled or replaced (guard with a `runId` and re-check after every `await`), state that survived `/clear` or a reload when it shouldn't (or didn't when it should), and engine state copied into the mod's own flags (decide from facts at decision time). Two review rounds of blockers in the same mechanism means change the mechanism.

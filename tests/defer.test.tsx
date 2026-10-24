@@ -23,7 +23,10 @@ function bottoms(on: On, answer: SubmitAnswer = text => ({ text }), canFill: () 
     filled.push(e.text)
     return { isFilled: true }
   })
-  on('prompt.read', () => ({ value: { text: 'draft', cursor: 5 } }))
+  // The prompt box as the engine would read it; a test sets it to stand for
+  // what the engine left there.
+  const box = { text: 'draft' }
+  on('prompt.read', () => ({ value: { text: box.text, cursor: box.text.length } }))
   on('ui.toast', ($, e) => {
     toasts.push(e.text)
     return { value: undefined }
@@ -38,7 +41,7 @@ function bottoms(on: On, answer: SubmitAnswer = text => ({ text }), canFill: () 
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('ui.render', ($, e) => { const { Box } = $.ui.resolve(e); return <Box /> })
-  return { submitted, filled, toasts, registered, settle: clock.settle }
+  return { submitted, filled, toasts, registered, box, settle: clock.settle }
 }
 
 const typedMidTurn = (text: string, wait: boolean) => ({
@@ -110,6 +113,24 @@ describe('holding a queued prompt', () => {
     await settle()
     expect(submitted.map(s => s.text)).toEqual(['then write the tests'])
     expect(submitted[0]?.origin).toEqual({ kind: 'plugin', name: 'defer-queue', asUser: true })
+  })
+
+  test('a held prompt left in the prompt box by the engine is cleared from it', async ($, on) => {
+    const { filled, box, settle } = bottoms(on)
+    await startTurn($)
+    box.text = '-> then write the tests'
+    await $.prompt.submit(typedMidTurn('-> then write the tests', false))
+    await settle()
+    expect(filled).toEqual([''])
+  })
+
+  test('a held prompt does not touch a box that holds something else', async ($, on) => {
+    const { filled, box, settle } = bottoms(on)
+    await startTurn($)
+    box.text = 'something new I started typing'
+    await $.prompt.submit(typedMidTurn('then write the tests', true))
+    await settle()
+    expect(filled).toEqual([])
   })
 
   test('a plain Enter mid-turn still steers by default', async ($, on) => {

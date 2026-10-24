@@ -182,6 +182,24 @@ async function queueEntries($: EngineInterface, entries: readonly string[], turn
   return n === 1 ? 'Nothing is running; sending it now.' : `Nothing is running; sending the first now (${n - 1} waiting).`
 }
 
+// Live on 2.1.310, a prompt a prompt.submit hook drops stays in the prompt
+// box, so a held prompt would go out a second time on the next Enter. Once the
+// drop has landed, clear the box if it still holds exactly that prompt; a box
+// holding anything else is left alone.
+function heldFrom($: EngineInterface, typed: string, message: string): { drop: string } {
+  $.clock.after(0, () => void clearIfStill($, typed))
+  return { drop: message }
+}
+
+async function clearIfStill($: EngineInterface, typed: string): Promise<void> {
+  try {
+    const box = await $.prompt.read()
+    if (box.text.trim() !== '' && box.text.trim() === typed.trim()) await $.prompt.fill({ text: '', mode: 'replace' })
+  } catch {
+    // Best effort: the prompt is held either way.
+  }
+}
+
 // /queue and its alias /defer.
 async function runQueue($: EngineInterface, args: string): Promise<{ text: string }> {
   const body = args.trim()
@@ -305,7 +323,7 @@ export const register: Register = (on, options) => {
       toast($, 'prompts with attachments are not queued (a resend would lose them); this one goes through now')
       return next(e)
     }
-    if (body === undefined) return { drop: await queueEntries($, [e.text], e.turnId) }
+    if (body === undefined) return heldFrom($, e.text, await queueEntries($, [e.text], e.turnId))
     const entries = splitQueuedMessages(body)
     if (entries.length === 0) return { drop: USAGE }
     if (entries.some(isCommandLike)) return { drop: CANT_QUEUE_COMMAND }
@@ -320,7 +338,7 @@ export const register: Register = (on, options) => {
         return result
       }
     }
-    return { drop: await queueEntries($, entries, e.turnId) }
+    return heldFrom($, e.text, await queueEntries($, entries, e.turnId))
   }).catch(($, e, next) => next(e)) // Fails open: a prompt the queue couldn't take goes to the turn, never lost.
 
   on('turn.start', async ($, e, next) => {
