@@ -17,9 +17,9 @@ export function insertBySeq(items: readonly Entry[], back: readonly Entry[]): En
   return [...items, ...back].sort((a, b) => a.seq - b.seq)
 }
 
-/** The prompt box text: entries oldest first, then the draft. */
+/** The prompt box text: entries oldest first, then the draft, blank lines between (omp's join). */
 export function joinForBox(texts: readonly string[], draft: string): string {
-  return [...texts, ...(draft === '' ? [] : [draft])].join('\n')
+  return [...texts, draft].filter(t => t.trim() !== '').join('\n\n')
 }
 
 export function firstLine(text: string): string {

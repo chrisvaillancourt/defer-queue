@@ -152,17 +152,44 @@ describe('holding a queued prompt', () => {
 })
 
 describe('releasing held prompts', () => {
-  test('an interrupted turn does not release them; the next answered turn does', async ($, on) => {
-    const { submitted, settle } = bottoms(on)
+  test('an interrupted main turn puts them all back in the prompt box, oldest first, and sends nothing', async ($, on) => {
+    const { submitted, filled, settle } = bottoms(on)
     await startTurn($)
-    await $.prompt.submit(typedMidTurn('after', true))
+    await $.prompt.submit(typedMidTurn('first', true))
+    await $.prompt.submit(typedMidTurn('second', true))
     await $.turn.complete(endTurn('aborted'))
     await settle()
+    expect(filled).toEqual(['first\n\nsecond\n\ndraft'])
     expect(submitted).toEqual([])
-    await startTurn($)
-    await $.turn.complete(endTurn('answer'))
+    // A background notification's turn answering later restarts nothing.
+    await $.prompt.submit({ text: 'task done', wait: false, origin: { kind: 'task-notification' } })
+    await startTurn($, 't2')
+    await $.turn.complete(endTurn('answer', undefined, 't2'))
     await settle()
-    expect(submitted.map(s => s.text)).toEqual(['after'])
+    expect(submitted.map(s => s.text)).toEqual(['task done'])
+  })
+
+  test("an interrupted turn the prompt box can't take back keeps them, paused", async ($, on) => {
+    const { submitted, settle } = bottoms(on, undefined, () => false)
+    await $.session.start(SESSION)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('first', true))
+    await $.turn.complete(endTurn('aborted'))
+    await settle()
+    await startTurn($, 't2')
+    await $.turn.complete(endTurn('answer', undefined, 't2'))
+    await settle()
+    expect(submitted).toEqual([])
+    expect((await run($, '')).text).toMatch(/paused[\s\S]*first/i)
+  })
+
+  test("a subagent's interrupted turn puts nothing back", async ($, on) => {
+    const { filled, settle } = bottoms(on)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('first', true))
+    await $.turn.complete(endTurn('aborted', 'agent-1', 'c1'))
+    await settle()
+    expect(filled).toEqual([])
   })
 
   test('an API error ending the turn does not release them', async ($, on) => {
@@ -290,23 +317,49 @@ describe('the band above the prompt', () => {
       expect(submitted).toEqual([])
     })
 
-    test(`takes held prompts back into the prompt box on ${surface}`, async ($, on) => {
-      const { filled } = bottoms(on)
+    test(`Take back returns only the newest held prompt, ahead of the draft, on ${surface}`, async ($, on) => {
+      const { filled, submitted, settle } = bottoms(on)
       await startTurn($)
       await $.prompt.submit(typedMidTurn('first', true))
       await $.prompt.submit(typedMidTurn('second', true))
       const ui = await $.ui.mount({ ...BAND, surface })
       await ui.press({ key: 'take-back' })
-      expect(filled).toEqual(['first\nsecond\ndraft'])
+      expect(filled).toEqual(['second\n\ndraft'])
+      expect(await ui.find({ type: 'Text', text: /second/ })).toBeUndefined()
+      expect(await ui.find({ type: 'Text', text: /first/ })).toBeDefined()
+      await $.turn.complete(endTurn('answer'))
+      await settle()
+      expect(submitted.map(s => s.text)).toEqual(['first'])
+    })
+
+    test(`Take back all returns every held prompt, oldest first, on ${surface}`, async ($, on) => {
+      const { filled } = bottoms(on)
+      await startTurn($)
+      await $.prompt.submit(typedMidTurn('first', true))
+      await $.prompt.submit(typedMidTurn('second', true))
+      const ui = await $.ui.mount({ ...BAND, surface })
+      await ui.press({ key: 'take-back-all' })
+      expect(filled).toEqual(['first\n\nsecond\n\ndraft'])
       expect(await ui.find({ type: 'Text', text: /first/ })).toBeUndefined()
     })
   }
+
+  test('Take back keeps the prompt held when the box cannot take it', async ($, on) => {
+    const { filled } = bottoms(on, undefined, () => false)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('first', true))
+    await $.prompt.submit(typedMidTurn('second', true))
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: 'take-back' })
+    expect(filled).toEqual([])
+    expect(await ui.find({ type: 'Text', text: /2\. second/ })).toBeDefined()
+  })
 
   test('offers Send next only while idle', async ($, on) => {
     const { submitted, settle } = bottoms(on)
     await startTurn($)
     await $.prompt.submit(typedMidTurn('first', true))
-    await $.turn.complete(endTurn('aborted'))
+    await $.turn.complete(endTurn('error'))
     const busy = await $.ui.mount({ ...BAND, surface: 'terminal' })
     expect(await busy.find({ key: 'send' })).toBeUndefined()
     await busy.unmount()
@@ -350,7 +403,7 @@ describe('when a release fails', () => {
     await $.prompt.submit(typedMidTurn('second', true))
     await $.turn.complete(endTurn('answer'))
     await settle()
-    expect(filled).toEqual(['first\ndraft'])
+    expect(filled).toEqual(['first\n\ndraft'])
     fail = false
     await startTurn($)
     await $.turn.complete(endTurn('answer'))
@@ -418,7 +471,7 @@ describe('when a release fails', () => {
     await $.prompt.submit(typedMidTurn('first', true))
     await $.turn.complete(endTurn('answer'))
     await settle()
-    expect(filled).toEqual(['first\ndraft'])
+    expect(filled).toEqual(['first\n\ndraft'])
   })
 })
 
@@ -445,7 +498,7 @@ describe('one release at a time', () => {
     await startTurn($)
     await $.prompt.submit(typedMidTurn('first', true))
     await $.prompt.submit(typedMidTurn('second', true))
-    await $.turn.complete(endTurn('aborted'))
+    await $.turn.complete(endTurn('error'))
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, isWorking: false } })
     await ui.press({ key: 'send' })
     await ui.press({ key: 'send' })
@@ -462,7 +515,7 @@ describe('ordering and session changes', () => {
     await $.session.start(SESSION)
     await startTurn($)
     await $.prompt.submit(typedMidTurn('first', true))
-    await $.turn.complete(endTurn('aborted'))
+    await $.turn.complete(endTurn('error'))
     await run($, 'second')
     await settle()
     expect(submitted.map(s => s.text)).toEqual(['first'])
@@ -483,10 +536,10 @@ describe('ordering and session changes', () => {
     on('session.end', ($, e) => ({ sessionId: e.sessionId }))
     await startTurn($)
     await $.prompt.submit(typedMidTurn('first', true))
-    await $.turn.complete(endTurn('aborted'))
+    await $.turn.complete(endTurn('error'))
     await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
     await settle()
-    expect(filled).toEqual(['first\ndraft'])
+    expect(filled).toEqual(['first\n\ndraft'])
     await startTurn($)
     await $.turn.complete(endTurn('answer'))
     await settle()

@@ -10,7 +10,8 @@ Stock Claude Code folds a message you queue mid-turn into the running turn as so
 - **`/defer <prompt>`** does the same from the command line. It works mid-turn. With nothing running, it sends right away, or behind prompts already waiting.
 - **`/defer`** with no text lists what's waiting.
 - **A band above the prompt** lists held prompts, with these buttons:
-  - **Take back** puts the held prompts back in the prompt box, ahead of your draft.
+  - **Take back** puts the newest held prompt back in the prompt box, ahead of your draft with a blank line between, and leaves the turn running (omp's dequeue).
+  - **Take back all** (shown with two or more held) puts them all back, oldest first.
   - **Discard** drops them.
   - **Send next** appears only while idle.
 
@@ -19,7 +20,8 @@ Set **Defer every mid-turn prompt** (`defer_all_mid_turn`) in `/config` to hold 
 ## When held prompts go out
 
 - **One per turn.** When a main-conversation turn ends with an answer, the oldest held prompt is sent. Each later one waits for the previous one's turn to finish.
-- **Nothing after Esc, an API error or a refusal.** Held prompts wait for the next turn that ends with an answer, or for **Send next**. `chat:sendNow` and Esc don't flush them, because they aren't in Claude Code's own queue.
+- **Esc puts them back.** When a main turn ends interrupted, every held prompt goes back in the prompt box, oldest first, ahead of your draft, and nothing is sent. If the box can't take them (a dialog is open), they stay held and the queue pauses until you press **Send next**. The mod sees the interrupt only once the turn has ended, so this happens after the stop, not before it as in omp, and it follows any interrupt of the main turn, not only Esc.
+- **Nothing after an API error or a refusal.** Held prompts wait for the next turn that ends with an answer, or for **Send next**. omp has a recovery coordinator for these cases; Claude Code tells a plugin only why the turn ended, so the mod holds rather than guess.
 - **Subagent turns don't count.** Their starts and ends are ignored, and only the end of the main turn that is running counts, once. A late or repeated end of an older turn releases nothing.
 - **`/clear` moves them back** to the prompt box. Prompts written for the old conversation aren't sent into the new one.
 - **Exiting the session loses them.** They are kept for the session only.

@@ -185,6 +185,35 @@ async function takeBackAll($: EngineInterface): Promise<void> {
   toast($, 'Could not reach the prompt box; kept the deferred prompts')
 }
 
+// omp's dequeue: the newest entry alone back into the prompt box, the turn
+// left running.
+async function takeBackNewest($: EngineInterface): Promise<void> {
+  let taken: Entry | undefined
+  await update($, queue, q => {
+    taken = q.items.at(-1)
+    return taken === undefined ? q : { ...q, items: q.items.slice(0, -1) }
+  })
+  if (taken === undefined) return
+  const entry = taken
+  if (await handBack($, [entry.text])) {
+    await update($, queue, q => (q.items.length === 0 ? { ...q, paused: false } : q))
+    return
+  }
+  await update($, queue, q => ({ ...q, items: insertBySeq(q.items, [entry]) }))
+  toast($, 'Could not reach the prompt box; kept the deferred prompt')
+}
+
+// omp's Esc: an interrupted main turn hands every queued entry back, oldest
+// first, ahead of the draft, and sends nothing. If the box can't take them
+// they stay queued, paused, so no later answer sends them unasked.
+async function restoreAfterAbort($: EngineInterface): Promise<void> {
+  const taken = await takeAllItems($)
+  if (taken.length === 0) return
+  if (await handBack($, taken.map(m => m.text))) return
+  await update($, queue, q => ({ ...q, items: insertBySeq(q.items, taken), paused: true }))
+  toast($, `Turn interrupted; could not reach the prompt box, so ${taken.length} deferred prompt(s) wait, paused`)
+}
+
 export const register: Register = (on, options) => {
   const deferAll = options.defer_all_mid_turn === true
 
@@ -227,9 +256,10 @@ export const register: Register = (on, options) => {
         isOurs = q.runningTurn === e.turnId
         return isOurs ? { ...q, runningTurn: null } : q
       })
-      // Only a turn the model ended itself counts as finished. After an
-      // interrupt, API error or refusal the prompts wait for the next answer.
+      // An answer releases the next entry. An interrupt hands them all back.
+      // After an API error or refusal they wait for the next answer.
       if (isOurs && e.reason === 'answer') await releaseNext($, 'auto')
+      if (isOurs && e.reason === 'aborted') await restoreAfterAbort($)
     }
     return next(e)
   })
@@ -283,7 +313,8 @@ export const register: Register = (on, options) => {
           {!e.props.isWorking && (
             <Button key="send" label="Send next" variant="primary" onPress={() => releaseNext($, 'explicit')} />
           )}
-          <Button key="take-back" label="Take back" onPress={() => takeBackAll($)} />
+          <Button key="take-back" label="Take back" onPress={() => takeBackNewest($)} />
+          {list.length > 1 && <Button key="take-back-all" label="Take back all" onPress={() => takeBackAll($)} />}
           <Button key="discard" label="Discard" onPress={() => takeAllItems($)} />
         </Box>
       </Box>
