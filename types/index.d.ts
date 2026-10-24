@@ -1,8 +1,8 @@
 /** A prompt waiting for the main turn to end. `seq` orders entries oldest first. */
 export type Entry = { seq: number; text: string }
 
-/** The entry a release took off the queue, until its submit settles. */
-export type Claim = { entry: Entry; token: string }
+/** The entry a release took off the queue, until its submit settles; `epoch` is the queue's when it was taken. */
+export type Claim = { entry: Entry; token: string; epoch: number }
 
 /**
  * An entry the mod will never send on its own: one handed back from before a

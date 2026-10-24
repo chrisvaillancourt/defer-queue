@@ -724,6 +724,30 @@ describe('ordering and session changes', () => {
     expect(submitted.map(s => s.text)).toEqual(['first', 'third'])
   })
 
+  test('a release the engine admits only after /clear is refused there and kept under Not sent', async ($, on) => {
+    const gate = deferred<PromptSubmitResult>()
+    let calls = 0
+    const { submitted, filled, settle } = bottoms(on, text => (calls++ === 0 ? gate.promise : { text }))
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    await $.session.start(SESSION)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('first', true))
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    // Live on 2.1.310 the engine runs a queued plugin prompt's prompt.submit
+    // hooks only when it admits it, which can be after the /clear.
+    const late = await $.prompt.submit({ text: 'first', wait: false, origin: { kind: 'plugin', name: 'defer-queue', asUser: true } })
+    expect(late.drop).toMatch(/new conversation/)
+    expect(submitted.map(s => s.text)).toEqual(['first'])
+    gate.resolve(late)
+    await settle()
+    const listed = (await run($, '')).text ?? ''
+    expect(listed).toMatch(/Not sent[\s\S]*first/)
+    expect(listed).not.toMatch(/may already have been sent/)
+    expect(filled).toEqual([])
+  })
+
   test('a send scheduled before /clear does not fire into the new conversation', async ($, on) => {
     const { submitted, settle } = bottoms(on)
     on('session.end', ($, e) => ({ sessionId: e.sessionId }))

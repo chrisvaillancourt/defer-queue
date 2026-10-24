@@ -82,7 +82,7 @@ async function releaseNext($: EngineInterface, why: 'auto' | 'explicit', epoch?:
     if (epoch !== undefined && q.epoch !== epoch) return q
     if (q.paused && why === 'auto') return q
     sending = head
-    return { ...q, items: q.items.slice(1), claim: { entry: head, token }, paused: false }
+    return { ...q, items: q.items.slice(1), claim: { entry: head, token, epoch: q.epoch }, paused: false }
   })
   if (sending === undefined) return
   void $.prompt.submit({ text: sending.text, asUser: true }).then(
@@ -97,6 +97,16 @@ async function releaseNext($: EngineInterface, why: 'auto' | 'explicit', epoch?:
 // take it, it returns to its place in the queue and the queue pauses, so a
 // failed release never starts another.
 async function settleRelease($: EngineInterface, token: string, failure: string | undefined): Promise<void> {
+  if (failure === `dropped: ${STALE_RELEASE}`) {
+    // Refused at admission (see admitOwnRelease): it was not sent, and it
+    // belongs to the old conversation, so it stays under Not sent.
+    await update($, queue, q => ({
+      ...q,
+      recovery: q.recovery.map(r => (r.token === token ? { seq: r.seq, text: r.text } : r)),
+    }))
+    toast($, 'A queued prompt from before /clear was not sent into the new conversation; it is under "Not sent"')
+    return
+  }
   if (failure === undefined) {
     await update($, queue, q =>
       q.claim?.token === token
@@ -159,6 +169,25 @@ async function adoptOnLoad($: EngineInterface): Promise<void> {
   })
   if (oldHeld.length > 0) await update($, legacyHeld, () => [])
   if (oldRunning !== null) await update($, legacyRunningTurn, () => null)
+}
+
+const STALE_RELEASE = 'Queued before /clear; not sent into the new conversation (kept under "Not sent")'
+
+// The mod's own release passes through prompt.submit when the engine admits
+// it, which (live, 2.1.310) can be after a /clear that ran while it waited.
+// Admit it only while it is still the current conversation's claim; a release
+// /clear or a reload moved to recovery is refused there and stays recoverable.
+async function admitOwnRelease($: EngineInterface, text: string): Promise<boolean> {
+  const q = await read($, queue)
+  if (q.claim !== null && q.claim.entry.text === text && q.claim.epoch === q.epoch) return true
+  if (!q.recovery.some(r => r.token !== undefined && r.text === text)) return true
+  // Refused here, so it is known unsent: drop the "may already have been
+  // sent" mark (after a reload no callback is left to do it).
+  await update($, queue, s => ({
+    ...s,
+    recovery: s.recovery.map(r => (r.token !== undefined && r.text === text ? { seq: r.seq, text: r.text } : r)),
+  }))
+  return false
 }
 
 const CANT_QUEUE_COMMAND =
@@ -313,6 +342,9 @@ export const register: Register = (on, options) => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    if (e.origin.kind === 'plugin' && e.origin.name === 'defer-queue') {
+      return (await admitOwnRelease($, e.text)) ? next(e) : { drop: STALE_RELEASE }
+    }
     if (!isPersons(e.origin) || isCommandLike(e.text)) return next(e)
     const isMidTurn = e.turnId !== undefined
     const body = parseQueueShorthand(e.text)
