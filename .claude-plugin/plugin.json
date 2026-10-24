@@ -13,5 +13,6 @@
       "description": "Off: only prompts sent with chat:queueSubmit (ctrl+x enter), -> / => or /queue wait for the turn to end. On: every prompt typed while Claude works waits, so nothing steers (not an omp behavior).",
       "default": false
     }
-  }
+  },
+  "license": "MIT"
 }

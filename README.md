@@ -114,3 +114,7 @@ Nothing extra. The mod makes no model calls and adds nothing to the system promp
 - `uv run python scripts/drive.py --workdir <scratch dir>` drives a live interactive session through a pty (queueing needs a running turn and a key a headless run can't send) and checks the core flow with a throwaway observer mod: about five short Haiku turns.
 
 The hooks API is early access and changes between Claude Code releases. This build was tested against Claude Code 2.1.310, in the terminal (2.1.310 raises `turn.start` for subagent runs too).
+
+## License
+
+MIT. See `LICENSE`.

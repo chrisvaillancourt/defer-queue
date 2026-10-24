@@ -92,5 +92,6 @@ Queueing needs a running turn and the `chat:queueSubmit` key, so its live check 
 
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`).
 - Bump `version` in `plugin.json` for every release users should get. Installs from GitHub run a copy, and `claude plugin update` only replaces it when the version changes. An install whose marketplace is a local clone runs from the clone itself: edit, then `/reload-plugins`.
+- MIT licensed: `LICENSE` at the root, and `plugin.json` says `MIT`.
 - Treat the repo as public: no secrets, tokens, session IDs, personal paths or employer-specific details in code, tests, docs or commit messages.
 - Don't add Claude or AI attribution trailers to commits.
