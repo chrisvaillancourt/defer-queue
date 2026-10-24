@@ -117,3 +117,42 @@ test('a prompt held while the carry owns the queue is adopted under Not sent, ne
   await clock.settle()
   expect(sent).not.toContain('ARRIVING_DURING_CLEAR')
 })
+
+// Delays defer-queue's releases and masks them, as a slow secret-masking mod
+// above it would: the pre-/clear release ends up with the newer one's text.
+const slowMasker = {
+  name: 'slow-masker',
+  tier: 'prepend',
+  register(on) {
+    on('prompt.submit', async ($, e, next) => {
+      if (e.origin.kind !== 'plugin' || e.origin.name !== 'defer-queue') return next(e)
+      if (e.text === 'old secret') await $.clock.sleep(100)
+      if (e.text === 'old [MASKED]') await $.clock.sleep(200)
+      return next({ ...e, text: e.text.replace('secret', '[MASKED]') })
+    })
+  },
+} as const satisfies Plugin
+
+test("an earlier epoch's release is refused at admission, whatever its text, and the current one is admitted", { plugins: [slowMasker] }, async ($, on) => {
+  const { clock, sid, sent } = fixture(on)
+  await $.session.start(SESSION)
+  await $.turn.start({ text: 'work', turnId: 't1' })
+  await $.prompt.submit(typed('old secret'))
+  await $.turn.complete(ended('answer'))
+  await clock.settle()
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+  sid.value = 's2'
+  await clock.settle()
+  await $.command.run({ ...LIST, args: 'old [MASKED]' })
+  await clock.settle()
+  // The pre-/clear release reaches defer-queue first, rewritten to the text
+  // of the release now standing.
+  await clock.advance(100)
+  expect(sent).toEqual([])
+  await clock.advance(100)
+  await clock.settle()
+  expect(sent).toEqual(['old [MASKED]'])
+  const listed = (await $.command.run(LIST)).text ?? ''
+  expect(listed).toContain('- old secret')
+  expect(listed).not.toContain('may already have been sent')
+})

@@ -135,21 +135,20 @@ const isPersons = (origin: PromptOrigin) => origin.kind === 'composer' || origin
 let lastToken = 0
 const newToken = () => `${Date.now()}-${(lastToken += 1)}`
 
-// Releases submitted and not yet admitted, oldest first. The engine admits a
-// plugin's prompts in order, so an admission is matched to one of these by
-// order, and by text only to prefer an exact match: a hook above may rewrite
-// the text, and $.prompt.submit carries no id. A reload empties it, and any
-// admission it can't match is refused.
-const awaitingAdmission: { token: string; text: string }[] = []
+// Releases submitted and not yet admitted, oldest first. The engine admits
+// a plugin's prompts in the order they were submitted, so an admission is
+// the oldest of these: never matched by text, which a hook above may have
+// rewritten (even into a newer release's text), and $.prompt.submit carries
+// no id. A release's settlement removes it. A reload empties it, and an
+// admission nothing is waiting for is refused.
+const awaitingAdmission: string[] = []
 
-function matchAdmission(text: string): string | undefined {
-  const exact = awaitingAdmission.findIndex(r => r.text === text)
-  const [match] = awaitingAdmission.splice(exact === -1 ? 0 : exact, 1)
-  return match?.token
+function matchAdmission(): string | undefined {
+  return awaitingAdmission.shift()
 }
 
 function forgetAdmission(token: string): void {
-  const i = awaitingAdmission.findIndex(r => r.token === token)
+  const i = awaitingAdmission.indexOf(token)
   if (i !== -1) awaitingAdmission.splice(i, 1)
 }
 
@@ -218,7 +217,7 @@ async function releaseNext($: EngineInterface, why: 'auto' | 'explicit', epoch?:
     return { ...q, items: q.items.slice(1), claim: { entry: head, token, epoch: q.epoch }, paused: false }
   })
   if (sending === undefined) return
-  awaitingAdmission.push({ token, text: sending.text })
+  awaitingAdmission.push(token)
   void $.prompt.submit({ text: sending.text, asUser: true }).then(
     result => (forgetAdmission(token), settleRelease($, token, result.drop === undefined ? undefined : `dropped: ${result.drop}`)),
     (error: unknown) => (forgetAdmission(token), settleRelease($, token, String(error))),
@@ -312,7 +311,7 @@ const STALE_RELEASE = 'Queued before /clear or a reload; not sent into the new c
 // Admit it only while it is still the current conversation's claim; a release
 // /clear or a reload moved to recovery is refused there and stays recoverable.
 async function admitOwnRelease($: EngineInterface, text: string): Promise<boolean> {
-  const token = matchAdmission(text)
+  const token = matchAdmission()
   if (admitsRelease(await getQ($), token)) return true
   await updQ($, q => keepRefusedRelease(q, token, text))
   return false
@@ -558,6 +557,16 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // Send next releases from this hook, not from the button's onPress: live
+  // on 2.1.310 a submit made from onPress (or a timer that fires after every
+  // hook of the mod has returned) skips the mod's own prompt.submit hook, so
+  // its admission would go unchecked; one made inside a hook of the mod
+  // passes through it.
+  on('ui.press', { plugin: 'defer-queue', element: 'send' }, async ($, e, next) => {
+    await releaseNext($, 'explicit')
+    return next(e)
+  })
+
   on('command.run', { command: 'queue' }, async ($, e) => runQueue($, e.args))
   on('command.run', { command: 'defer' }, async ($, e) => runQueue($, e.args))
 
@@ -594,7 +603,7 @@ export const register: Register = (on, options) => {
             {list.length > shown.length && <Text dimColor>…and {list.length - shown.length} more</Text>}
             <Box flexDirection="row" gap={1}>
               {!e.props.isWorking && (
-                <Button key="send" label="Send next" variant="primary" onPress={() => releaseNext($, 'explicit')} />
+                <Button key="send" label="Send next" variant="primary" onPress={() => undefined} />
               )}
               <Button key="take-back" label="Take back" onPress={() => takeBackNewest($)} />
               {list.length > 1 && <Button key="take-back-all" label="Take back all" onPress={() => takeBackAll($)} />}
