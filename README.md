@@ -25,7 +25,8 @@ Set **Defer every mid-turn prompt** (`defer_all_mid_turn`) in `/config` to hold 
 - **Esc puts them back.** When a main turn ends interrupted, every held prompt goes back in the prompt box, oldest first, ahead of your draft, and nothing is sent. If the box can't take them (a dialog is open), they stay held and the queue pauses until you press **Send next**. The mod sees the interrupt only once the turn has ended, so this happens after the stop, not before it as in omp, and it follows any interrupt of the main turn, not only Esc.
 - **Nothing after an API error or a refusal.** Held prompts wait for the next turn that ends with an answer, or for **Send next**. omp has a recovery coordinator for these cases; Claude Code tells a plugin only why the turn ended, so the mod holds rather than guess.
 - **Subagent turns don't count.** Their starts and ends are ignored, and only the end of the main turn that is running counts, once. A late or repeated end of an older turn releases nothing.
-- **`/clear` moves them back** to the prompt box. Prompts written for the old conversation aren't sent into the new one.
+- **`/clear` (and a resume) moves them back** to the prompt box. Prompts written for the old conversation aren't sent into the new one, and a send scheduled before the `/clear` is cancelled. omp discards its queue here; this mod hands it back so nothing is lost. If the box can't take them, or a prompt was mid-send, they're kept under **Not sent** (below).
+- **Not sent** is a second list in the band, and in `/queue`: prompts the mod will never send on its own (from before a `/clear` the box couldn't take, or a send a reload left unsettled, marked "may already have been sent"). **Put back in prompt box** or **Drop** them.
 - **Exiting the session loses them.** They are kept for the session only.
 
 ## What a held prompt can't carry

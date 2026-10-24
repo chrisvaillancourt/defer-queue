@@ -666,6 +666,78 @@ describe('ordering and session changes', () => {
     expect(submitted).toEqual([])
   })
 
+  test('a resume hands held prompts back too', async ($, on) => {
+    const { filled, settle } = bottoms(on)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('first', true))
+    await $.session.end({ reason: 'resume', sessionId: 's1', resume: { id: 's1' } })
+    await settle()
+    expect(filled).toEqual(['first\n\ndraft'])
+  })
+
+  test('/clear during a release keeps the rest out of the new conversation, and a late settle changes nothing there', async ($, on) => {
+    const gate = deferred<PromptSubmitResult>()
+    const { submitted, filled, settle } = bottoms(on, () => gate.promise)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    await $.session.start(SESSION)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('first', true))
+    await $.prompt.submit(typedMidTurn('second', true))
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    await settle()
+    expect(filled).toEqual(['second\n\ndraft'])
+    expect((await run($, '')).text).toMatch(/first.*may already have been sent/)
+    // The new conversation queues its own prompt; the old release settles late.
+    await startTurn($, 't2')
+    await $.prompt.submit({ ...typedMidTurn('third', true), turnId: 't2' })
+    gate.resolve({ text: 'first' })
+    await settle()
+    const listed = (await run($, '')).text ?? ''
+    expect(listed).toMatch(/1\. third/)
+    expect(listed).not.toMatch(/first/)
+    await $.turn.complete(endTurn('answer', undefined, 't2'))
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['first', 'third'])
+  })
+
+  test('a send scheduled before /clear does not fire into the new conversation', async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    await $.session.start(SESSION)
+    await run($, 'old')
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    await startTurn($, 't2')
+    await $.prompt.submit({ ...typedMidTurn('new', true), turnId: 't2' })
+    await settle()
+    expect(submitted).toEqual([])
+  })
+
+  test("prompts /clear can't hand back are kept under Not sent, never sent, and can be put back", async ($, on) => {
+    let canFill = false
+    const { submitted, filled, settle } = bottoms(on, undefined, () => canFill)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    await $.session.start(SESSION)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('first', true))
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    await settle()
+    expect((await run($, '')).text).toMatch(/Not sent[\s\S]*first/)
+    await startTurn($, 't2')
+    await $.turn.complete(endTurn('answer', undefined, 't2'))
+    await settle()
+    expect(submitted).toEqual([])
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, isWorking: false } })
+    expect(await ui.find({ type: 'Text', text: /first/ })).toBeDefined()
+    expect(await ui.find({ key: 'send' })).toBeUndefined()
+    canFill = true
+    await ui.press({ key: 'recovery-take' })
+    expect(filled).toEqual(['first\n\ndraft'])
+    expect(await ui.find({ type: 'Text', text: /first/ })).toBeUndefined()
+  })
+
   test("an older turn's late end does not mark a newer running turn idle", async ($, on) => {
     const { submitted, settle } = bottoms(on)
     await $.session.start(SESSION)

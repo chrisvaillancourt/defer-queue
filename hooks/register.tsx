@@ -236,6 +236,44 @@ async function restoreAfterAbort($: EngineInterface): Promise<void> {
   toast($, `Turn interrupted; could not reach the prompt box, so ${taken.length} queued prompt(s) wait, paused`)
 }
 
+// /clear or a resume: prompts written for the old conversation don't belong
+// in the new one. omp discards them; this hands them back to the prompt box
+// instead, so nothing is lost. The epoch bump cancels sends scheduled before
+// it, and an unsettled release moves to recovery (it may land, or not). What
+// the box can't take goes to recovery too: never sent by the mod.
+async function resetForNewConversation($: EngineInterface, why: 'clear' | 'resume'): Promise<void> {
+  let taken: Entry[] = []
+  await update($, queue, q => {
+    taken = q.items
+    const recovery = q.claim === null ? q.recovery : [...q.recovery, { ...q.claim.entry, token: q.claim.token, maybeSent: true as const }]
+    return { ...q, epoch: q.epoch + 1, runningTurn: null, items: [], claim: null, paused: false, recovery }
+  })
+  if (taken.length === 0) return
+  const label = why === 'clear' ? '/clear' : 'Resume'
+  if (await handBack($, taken.map(m => m.text))) {
+    toast($, `${label}: ${taken.length} queued prompt(s) moved back to the prompt box`)
+    return
+  }
+  const kept = taken
+  await update($, queue, q => ({ ...q, recovery: [...q.recovery, ...kept] }))
+  toast($, `${label}: could not reach the prompt box; kept ${kept.length} queued prompt(s) under "Not sent" (/queue lists them)`)
+}
+
+async function takeBackRecovery($: EngineInterface): Promise<void> {
+  const { recovery } = await read($, queue)
+  if (recovery.length === 0) return
+  if (!(await handBack($, recovery.map(m => m.text)))) {
+    toast($, 'Could not reach the prompt box; kept them under "Not sent"')
+    return
+  }
+  const seqs = new Set(recovery.map(m => m.seq))
+  await update($, queue, q => ({ ...q, recovery: q.recovery.filter(m => !seqs.has(m.seq)) }))
+}
+
+async function dropRecovery($: EngineInterface): Promise<void> {
+  await update($, queue, q => ({ ...q, recovery: [] }))
+}
+
 export const register: Register = (on, options) => {
   const deferAll = options.defer_all_mid_turn === true
 
@@ -310,20 +348,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear') {
-      // Prompts written for the old conversation don't belong in the new one.
-      await update($, queue, q => ({ ...q, runningTurn: null }))
-      const taken = await takeAllItems($)
-      if (taken.length > 0) {
-        const isBack = await handBack($, taken.map(m => m.text))
-        toast(
-          $,
-          isBack
-            ? `/clear: ${taken.length} queued prompt(s) moved back to the prompt box`
-            : `/clear: discarded ${taken.length} queued prompt(s): ${taken.map(m => firstLine(m.text)).join(' | ')}`,
-        )
-      }
-    }
+    if (e.reason === 'clear' || e.reason === 'resume') await resetForNewConversation($, e.reason)
     return next(e)
   })
 
@@ -334,10 +359,12 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey || e.props.view.agentId !== undefined) return next(e)
     const q = await read($, queue)
     const list = q.items
-    if (list.length === 0) return next(e)
+    const kept = q.recovery
+    if (list.length === 0 && kept.length === 0) return next(e)
 
     const { Box, Button, Text } = $.ui.resolve(e)
     const shown = list.slice(0, BAND_ROWS)
+    const keptShown = kept.slice(0, BAND_ROWS)
     const status = q.paused
       ? 'and paused: press Send next to resume'
       : e.props.isWorking
@@ -346,23 +373,43 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
-        <Text dimColor>
-          Queued {status} ({list.length}):
-        </Text>
-        {shown.map((m, i) => (
-          <Text wrap="truncate-end">
-            {i + 1}. {firstLine(m.text)}
-          </Text>
-        ))}
-        {list.length > shown.length && <Text dimColor>…and {list.length - shown.length} more</Text>}
-        <Box flexDirection="row" gap={1}>
-          {!e.props.isWorking && (
-            <Button key="send" label="Send next" variant="primary" onPress={() => releaseNext($, 'explicit')} />
-          )}
-          <Button key="take-back" label="Take back" onPress={() => takeBackNewest($)} />
-          {list.length > 1 && <Button key="take-back-all" label="Take back all" onPress={() => takeBackAll($)} />}
-          <Button key="discard" label="Discard" onPress={() => takeAllItems($)} />
-        </Box>
+        {list.length > 0 && (
+          <Box flexDirection="column">
+            <Text dimColor>
+              Queued {status} ({list.length}):
+            </Text>
+            {shown.map((m, i) => (
+              <Text wrap="truncate-end">
+                {i + 1}. {firstLine(m.text)}
+              </Text>
+            ))}
+            {list.length > shown.length && <Text dimColor>…and {list.length - shown.length} more</Text>}
+            <Box flexDirection="row" gap={1}>
+              {!e.props.isWorking && (
+                <Button key="send" label="Send next" variant="primary" onPress={() => releaseNext($, 'explicit')} />
+              )}
+              <Button key="take-back" label="Take back" onPress={() => takeBackNewest($)} />
+              {list.length > 1 && <Button key="take-back-all" label="Take back all" onPress={() => takeBackAll($)} />}
+              <Button key="discard" label="Discard" onPress={() => takeAllItems($)} />
+            </Box>
+          </Box>
+        )}
+        {kept.length > 0 && (
+          <Box flexDirection="column">
+            <Text dimColor>Not sent, kept for you ({kept.length}):</Text>
+            {keptShown.map(m => (
+              <Text wrap="truncate-end">
+                - {firstLine(m.text)}
+                {m.maybeSent === true ? ' (may already have been sent)' : ''}
+              </Text>
+            ))}
+            {kept.length > keptShown.length && <Text dimColor>…and {kept.length - keptShown.length} more</Text>}
+            <Box flexDirection="row" gap={1}>
+              <Button key="recovery-take" label="Put back in prompt box" onPress={() => takeBackRecovery($)} />
+              <Button key="recovery-drop" label="Drop" onPress={() => dropRecovery($)} />
+            </Box>
+          </Box>
+        )}
       </Box>
     )
   })
