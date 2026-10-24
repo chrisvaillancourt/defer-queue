@@ -112,7 +112,7 @@ Nothing extra. The mod makes no model calls and adds nothing to the system promp
 
 - `scripts/check.sh` runs every commit gate: `claude plugin validate .`, `claude plugin test .` (`tests/*.test.ts(x)`), and a typecheck.
 - `claude --plugin-dir .` runs a session with this working copy. If defer-queue is also installed, add `--settings '{"enabledPlugins":{"defer-queue@defer-queue":false}}'` so only the working copy loads.
-- `uv run python scripts/drive.py --workdir <scratch dir>` drives a live interactive session through a pty (queueing needs a running turn and a key a headless run can't send) and checks the core flow with a throwaway observer mod: about five short Haiku turns.
+- `uv run python scripts/drive.py --workdir <scratch dir>` drives a live interactive session through a pty (queueing needs a running turn and a key a headless run can't send) and checks the core flow, and a `/clear` with two prompts held, with a throwaway observer mod: about six short Haiku turns.
 
 The hooks API is early access and changes between Claude Code releases. This build was tested against Claude Code 2.1.310, in the terminal (2.1.310 raises `turn.start` for subagent runs too).
 

@@ -9,7 +9,7 @@ Queueing needs a running turn and the chat:queueSubmit key, which a headless
 It writes a throwaway observer mod into <workdir>/observer that logs
 prompt.submit, prompt.fill, turn.start, turn.complete and command.run to
 <workdir>/events.jsonl, starts `claude --plugin-dir <this repo> --plugin-dir
-<observer> --model haiku`, and walks four scenarios:
+<observer> --model haiku`, and walks five scenarios:
 
   1. A long turn (a 25-second ping); `-> TWO` (plain Enter) and `THREE` (ctrl+x enter) typed
      during it. Expect: both held, then sent one per answered turn, in order.
@@ -17,13 +17,16 @@ prompt.submit, prompt.fill, turn.start, turn.complete and command.run to
      back into the prompt box, nothing sent.
   3. `/queue` alone. Expect: usage plus the (empty) list.
   4. `-> SIX` while idle with nothing held. Expect: goes through as typed.
+  5. A long turn; `-> SEVEN` and `-> EIGHT` held, then `/clear` typed during
+     it. Expect: neither starts a turn (in either conversation), and each is
+     back in the prompt box or listed under Not sent by `/queue`.
 
 An installed copy of defer-queue would load too and hold prompts twice, so
 the session gets --settings disabling `defer-queue@defer-queue` (override
 with --installed-id). Check the debug log afterwards: the plugin must load
 from this repo's path only.
 
-Each run costs four or five short Haiku turns. Exit status 0 when every
+Each run costs about six short Haiku turns. Exit status 0 when every
 expectation held; the summary prints what did not.
 """
 
@@ -68,6 +71,7 @@ async function log($: EngineInterface, row: Record<string, unknown>) {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => { await log($, { ev: 'session.start' }); return next(e) })
+  on('session.end', async ($, e, next) => { await log($, { ev: 'session.end', reason: e.reason }); return next(e) })
   on('prompt.submit', async ($, e, next) => {
     const r = await next(e)
     await log($, { ev: 'prompt.submit', text: e.text, origin: e.origin, wait: e.wait, turnId: e.turnId, drop: r.drop })
@@ -297,6 +301,36 @@ def main() -> int:
         expect(any(x["origin"].get("kind") == "composer" and x["text"] == "Reply with only the word SIX." for x in six),
                f"SIX entered as the person's own prompt, arrow stripped: {[(x['text'], x['origin']) for x in six]}")
         wait_for(s, out, lambda r: len(main_completions(r, "answer")) >= 4, 60)
+
+        # 5. Two held prompts and a /clear typed during the turn: the turn's
+        # end releases SEVEN as /clear runs; neither may reach a conversation.
+        s.pump(3)
+        n_start = len([x for x in events(out) if x["ev"] == "turn.start"])
+        s.type_line("Use the Bash tool to run: ping -c 20 127.0.0.1. Then reply with only the word DONE.")
+        wait_for(s, out, lambda r: len([x for x in r if x["ev"] == "turn.start"]) > n_start, 30)
+        s.pump(4)
+        for word in ("SEVEN", "EIGHT"):
+            s.type_line(f"-> Reply with only the word {word}.")
+            s.pump(1)
+            s.key("\x15")
+        s.type_line("/clear")
+        wait_for(s, out, lambda r: any(x["ev"] == "session.end" and x.get("reason") == "clear" for x in r), 60)
+        s.pump(6)
+        s.key("\x15")
+        s.type_line("/queue")
+        s.pump(4)
+        rows = events(out)
+        started = [x["text"] for x in rows if x["ev"] == "turn.start" and x.get("agentId") is None
+                   and ("SEVEN" in x.get("text", "") or "EIGHT" in x.get("text", ""))]
+        expect(started == [], f"neither held prompt started a turn across /clear: {started}")
+        fills = " ".join(x["text"] for x in rows if x["ev"] == "prompt.fill")
+        # /queue's answer never reaches the observer (defer-queue answers it),
+        # so read the screen: what follows the last "Not sent" heading.
+        screen = s.text.decode("utf-8", "replace")
+        kept = screen[screen.rfind("Notsent,keptforyou"):] if "Notsent,keptforyou" in screen else ""
+        for word in ("SEVEN", "EIGHT"):
+            expect(word in fills or f"theword{word}" in kept,
+                   f"{word} is back in the box or under Not sent (fills: {fills!r}; Not sent on screen: {kept[:200]!r})")
     finally:
         s.close()
 
