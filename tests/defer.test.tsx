@@ -18,14 +18,16 @@ function bottoms(on: On, answer: SubmitAnswer = text => ({ text }), canFill: () 
     submitted.push({ text: e.text, origin: e.origin })
     return answer(e.text)
   })
+  // The prompt box as the engine holds it; a test sets it to stand for what
+  // the person typed or the engine left there. `filled` records the box after
+  // each fill the plugin makes.
+  const box = { text: 'draft' }
   on('prompt.fill', ($, e) => {
     if (!canFill()) return { isFilled: false, refusal: 'dialog' }
-    filled.push(e.text)
+    box.text = e.mode === 'replace' ? e.text : box.text + e.text
+    filled.push(box.text)
     return { isFilled: true }
   })
-  // The prompt box as the engine would read it; a test sets it to stand for
-  // what the engine left there.
-  const box = { text: 'draft' }
   on('prompt.read', () => ({ value: { text: box.text, cursor: box.text.length } }))
   on('ui.toast', ($, e) => {
     toasts.push(e.text)
@@ -115,21 +117,13 @@ describe('holding a queued prompt', () => {
     expect(submitted[0]?.origin).toEqual({ kind: 'plugin', name: 'defer-queue', asUser: true })
   })
 
-  test('a held prompt left in the prompt box by the engine is cleared from it', async ($, on) => {
+  test('a held prompt the engine leaves in the box is left there, and the drop says so', async ($, on) => {
     const { filled, box, settle } = bottoms(on)
     await startTurn($)
     box.text = '-> then write the tests'
-    await $.prompt.submit(typedMidTurn('-> then write the tests', false))
+    const result = await $.prompt.submit(typedMidTurn('-> then write the tests', false))
     await settle()
-    expect(filled).toEqual([''])
-  })
-
-  test('a held prompt does not touch a box that holds something else', async ($, on) => {
-    const { filled, box, settle } = bottoms(on)
-    await startTurn($)
-    box.text = 'something new I started typing'
-    await $.prompt.submit(typedMidTurn('then write the tests', true))
-    await settle()
+    expect(result.drop).toMatch(/clear the box/i)
     expect(filled).toEqual([])
   })
 
@@ -184,7 +178,7 @@ describe('releasing held prompts', () => {
     await $.prompt.submit(typedMidTurn('second', true))
     await $.turn.complete(endTurn('aborted'))
     await settle()
-    expect(filled).toEqual(['first\n\nsecond\n\ndraft'])
+    expect(filled).toEqual(['draft\n\nfirst\n\nsecond'])
     expect(submitted).toEqual([])
     // A background notification's turn answering later restarts nothing.
     await $.prompt.submit({ text: 'task done', wait: false, origin: { kind: 'task-notification' } })
@@ -458,14 +452,14 @@ describe('the band above the prompt', () => {
       expect(submitted).toEqual([])
     })
 
-    test(`Take back returns only the newest held prompt, ahead of the draft, on ${surface}`, async ($, on) => {
+    test(`Take back returns only the newest held prompt, after the draft, on ${surface}`, async ($, on) => {
       const { filled, submitted, settle } = bottoms(on)
       await startTurn($)
       await $.prompt.submit(typedMidTurn('first', true))
       await $.prompt.submit(typedMidTurn('second', true))
       const ui = await $.ui.mount({ ...BAND, surface })
       await ui.press({ key: 'take-back' })
-      expect(filled).toEqual(['second\n\ndraft'])
+      expect(filled).toEqual(['draft\n\nsecond'])
       expect(await ui.find({ type: 'Text', text: /second/ })).toBeUndefined()
       expect(await ui.find({ type: 'Text', text: /first/ })).toBeDefined()
       await $.turn.complete(endTurn('answer'))
@@ -480,7 +474,7 @@ describe('the band above the prompt', () => {
       await $.prompt.submit(typedMidTurn('second', true))
       const ui = await $.ui.mount({ ...BAND, surface })
       await ui.press({ key: 'take-back-all' })
-      expect(filled).toEqual(['first\n\nsecond\n\ndraft'])
+      expect(filled).toEqual(['draft\n\nfirst\n\nsecond'])
       expect(await ui.find({ type: 'Text', text: /first/ })).toBeUndefined()
     })
   }
@@ -544,7 +538,7 @@ describe('when a release fails', () => {
     await $.prompt.submit(typedMidTurn('second', true))
     await $.turn.complete(endTurn('answer'))
     await settle()
-    expect(filled).toEqual(['first\n\ndraft'])
+    expect(filled).toEqual(['draft\n\nfirst'])
     fail = false
     await startTurn($)
     await $.turn.complete(endTurn('answer'))
@@ -612,7 +606,7 @@ describe('when a release fails', () => {
     await $.prompt.submit(typedMidTurn('first', true))
     await $.turn.complete(endTurn('answer'))
     await settle()
-    expect(filled).toEqual(['first\n\ndraft'])
+    expect(filled).toEqual(['draft\n\nfirst'])
   })
 })
 
@@ -680,7 +674,7 @@ describe('ordering and session changes', () => {
     await $.turn.complete(endTurn('error'))
     await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
     await settle()
-    expect(filled).toEqual(['first\n\ndraft'])
+    expect(filled).toEqual(['draft\n\nfirst'])
     await startTurn($)
     await $.turn.complete(endTurn('answer'))
     await settle()
@@ -694,7 +688,7 @@ describe('ordering and session changes', () => {
     await $.prompt.submit(typedMidTurn('first', true))
     await $.session.end({ reason: 'resume', sessionId: 's1', resume: { id: 's1' } })
     await settle()
-    expect(filled).toEqual(['first\n\ndraft'])
+    expect(filled).toEqual(['draft\n\nfirst'])
   })
 
   test('/clear during a release keeps the rest out of the new conversation, and a late settle changes nothing there', async ($, on) => {
@@ -709,7 +703,7 @@ describe('ordering and session changes', () => {
     await settle()
     await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
     await settle()
-    expect(filled).toEqual(['second\n\ndraft'])
+    expect(filled).toEqual(['draft\n\nsecond'])
     expect((await run($, '')).text).toMatch(/first.*may already have been sent/)
     // The new conversation queues its own prompt; the old release settles late.
     await startTurn($, 't2')
@@ -779,7 +773,7 @@ describe('ordering and session changes', () => {
     expect(await ui.find({ key: 'send' })).toBeUndefined()
     canFill = true
     await ui.press({ key: 'recovery-take' })
-    expect(filled).toEqual(['first\n\ndraft'])
+    expect(filled).toEqual(['draft\n\nfirst'])
     expect(await ui.find({ type: 'Text', text: /first/ })).toBeUndefined()
   })
 

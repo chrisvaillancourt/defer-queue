@@ -17,9 +17,15 @@ export function insertBySeq(items: readonly Entry[], back: readonly Entry[]): En
   return [...items, ...back].sort((a, b) => a.seq - b.seq)
 }
 
-/** The prompt box text: entries oldest first, then the draft, blank lines between (omp's join). */
-export function joinForBox(texts: readonly string[], draft: string): string {
-  return [...texts, draft].filter(t => t.trim() !== '').join('\n\n')
+/**
+ * What an `append` fill adds after the draft: entries oldest first, blank
+ * lines between (omp's join), and a blank line after a draft that has text.
+ * omp puts them ahead of the draft; a plugin can only replace the whole box
+ * (losing what is typed meanwhile) or add after it, so they go after.
+ */
+export function appendText(texts: readonly string[], draftHasText: boolean): string {
+  const body = texts.filter(t => t.trim() !== '').join('\n\n')
+  return draftHasText && body !== '' ? `\n\n${body}` : body
 }
 
 export function firstLine(text: string): string {

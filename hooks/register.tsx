@@ -7,7 +7,7 @@ import {
   firstLine,
   insertBySeq,
   isCommandLike,
-  joinForBox,
+  appendText,
   listText,
   parseQueueShorthand,
   splitQueuedMessages,
@@ -43,13 +43,26 @@ async function hold($: EngineInterface, texts: readonly string[], turnId?: strin
   }))
 }
 
-// Puts texts in the prompt box ahead of the draft. Resolves whether the box
-// took them; the caller decides what happens to them if it didn't.
+// Puts texts in the prompt box after the draft. Resolves whether the box took
+// them; the caller decides what happens to them if it didn't.
+//
+// Never a read-then-replace: the person can type between a read and a write,
+// and replacing would delete that. An `append` keeps whatever the box holds
+// when it lands. Handbacks also run one at a time, in the order asked, so two
+// overlapping ones can't interleave. (The read only decides the separator.)
+let boxChain: Promise<unknown> = Promise.resolve()
+
 async function handBack($: EngineInterface, texts: readonly string[]): Promise<boolean> {
   if (texts.length === 0) return true
+  const turn = boxChain.then(() => appendToBox($, texts))
+  boxChain = turn.catch(() => false)
+  return turn
+}
+
+async function appendToBox($: EngineInterface, texts: readonly string[]): Promise<boolean> {
   try {
-    const draft = await $.prompt.read()
-    const { isFilled } = await $.prompt.fill({ text: joinForBox(texts, draft.text), mode: 'replace' })
+    const box = await $.prompt.read()
+    const { isFilled } = await $.prompt.fill({ text: appendText(texts, box.text.trim() !== ''), mode: 'append' })
     return isFilled
   } catch {
     return false
@@ -212,21 +225,13 @@ async function queueEntries($: EngineInterface, entries: readonly string[], turn
 }
 
 // Live on 2.1.310, a prompt a prompt.submit hook drops stays in the prompt
-// box, so a held prompt would go out a second time on the next Enter. Once the
-// drop has landed, clear the box if it still holds exactly that prompt; a box
-// holding anything else is left alone.
-function heldFrom($: EngineInterface, typed: string, message: string): { drop: string } {
-  $.clock.after(0, () => void clearIfStill($, typed))
-  return { drop: message }
-}
+// box. Clearing it would need a read-then-replace, which can delete what the
+// person types meanwhile (the API has no write-if-unchanged), so the text is
+// left there and the drop message says so.
+const LEFTOVER = ' Your text stays in the box: clear the box before pressing Enter, or it is sent again.'
 
-async function clearIfStill($: EngineInterface, typed: string): Promise<void> {
-  try {
-    const box = await $.prompt.read()
-    if (box.text.trim() !== '' && box.text.trim() === typed.trim()) await $.prompt.fill({ text: '', mode: 'replace' })
-  } catch {
-    // Best effort: the prompt is held either way.
-  }
+function held(message: string): { drop: string } {
+  return { drop: `${message}${LEFTOVER}` }
 }
 
 // /queue and its alias /defer.
@@ -273,7 +278,7 @@ async function takeBackNewest($: EngineInterface): Promise<void> {
 }
 
 // omp's Esc: an interrupted main turn hands every queued entry back, oldest
-// first, ahead of the draft, and sends nothing. If the box can't take them
+// first, after the draft, and sends nothing. If the box can't take them
 // they stay queued, paused, so no later answer sends them unasked.
 async function restoreAfterAbort($: EngineInterface): Promise<void> {
   const taken = await takeAllItems($)
@@ -355,7 +360,7 @@ export const register: Register = (on, options) => {
       toast($, 'prompts with attachments are not queued (a resend would lose them); this one goes through now')
       return next(e)
     }
-    if (body === undefined) return heldFrom($, e.text, await queueEntries($, [e.text], e.turnId))
+    if (body === undefined) return held(await queueEntries($, [e.text], e.turnId))
     const entries = splitQueuedMessages(body)
     if (entries.length === 0) return { drop: USAGE }
     if (entries.some(isCommandLike)) return { drop: CANT_QUEUE_COMMAND }
@@ -370,7 +375,7 @@ export const register: Register = (on, options) => {
         return result
       }
     }
-    return heldFrom($, e.text, await queueEntries($, entries, e.turnId))
+    return held(await queueEntries($, entries, e.turnId))
   }).catch(($, e, next) => next(e)) // Fails open: a prompt the queue couldn't take goes to the turn, never lost.
 
   on('turn.start', async ($, e, next) => {

@@ -243,7 +243,10 @@ def main() -> int:
         s.pump(5)
         s.type_line("-> Reply with only the word TWO.")
         s.pump(1)
+        s.key("\x15")  # ctrl+u: a held prompt's text stays in the box; clear it as a person would
         s.type_line("Reply with only the word THREE.", submit="\x18\r")
+        s.pump(1)
+        s.key("\x15")
         expect(wait_for(s, out, lambda r: len(main_completions(r, "answer")) >= 3, 180),
                "three answered main turns (ONE, then TWO, then THREE)")
         rows = events(out)
@@ -262,7 +265,9 @@ def main() -> int:
         wait_for(s, out, lambda r: len([x for x in r if x["ev"] == "turn.start"]) > n_start, 30)
         s.pump(5)
         s.type_line("-> Reply with only the word FIVE.")
-        s.pump(2)
+        s.pump(1)
+        s.key("\x15")
+        s.pump(1)
         s.send("\x1b", gap=0.5)
         expect(wait_for(s, out, lambda r: len(main_completions(r, "aborted")) >= 1, 30), "turn ended aborted after Esc")
         s.pump(5)

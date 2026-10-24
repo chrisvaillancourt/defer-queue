@@ -12,7 +12,7 @@ Stock Claude Code folds a message you queue mid-turn into the running turn as so
 - **Lists split.** After `->`, `=>` or `/queue`, a numbered (`1.`), lettered (`a)`) or Roman-numeral (`iv.`) list of two or more items in sequence queues one prompt per item; lines under an item stay with it. A gap, mixed `.` and `)`, mixed case or an empty item inside the list keeps the whole text as one prompt; an empty last item is dropped. Prompts sent with `ctrl+x enter` alone are never split.
 - **`/queue`** with no text prints usage and lists what's waiting, including anything paused or kept under "Not sent".
 - **A band above the prompt** lists held prompts, with these buttons:
-  - **Take back** puts the newest held prompt back in the prompt box, ahead of your draft with a blank line between, and leaves the turn running (omp's dequeue).
+  - **Take back** puts the newest held prompt back in the prompt box, after your draft with a blank line between, and leaves the turn running (omp's dequeue).
   - **Take back all** (shown with two or more held) puts them all back, oldest first.
   - **Discard** drops them.
   - **Send next** appears only while idle.
@@ -28,7 +28,7 @@ There are no steering or interrupt mode settings: Claude Code keeps its own stee
 ## When held prompts go out
 
 - **One per turn.** When a main-conversation turn ends with an answer, the oldest held prompt is sent. Each later one waits for the previous one's turn to finish.
-- **Esc puts them back.** When a main turn ends interrupted, every held prompt goes back in the prompt box, oldest first, ahead of your draft, and nothing is sent. If the box can't take them (a dialog is open), they stay held and the queue pauses until you press **Send next**. The mod sees the interrupt only once the turn has ended, so this happens after the stop, not before it as in omp, and it follows any interrupt of the main turn, not only Esc.
+- **Esc puts them back.** When a main turn ends interrupted, every held prompt goes back in the prompt box, oldest first, after your draft, and nothing is sent. If the box can't take them (a dialog is open), they stay held and the queue pauses until you press **Send next**. The mod sees the interrupt only once the turn has ended, so this happens after the stop, not before it as in omp, and it follows any interrupt of the main turn, not only Esc.
 - **Nothing after an API error or a refusal.** Held prompts wait for the next turn that ends with an answer, or for **Send next**. omp has a recovery coordinator for these cases; Claude Code tells a plugin only why the turn ended, so the mod holds rather than guess.
 - **Subagent turns don't count.** Their starts and ends are ignored, and only the end of the main turn that is running counts, once. A late or repeated end of an older turn releases nothing.
 - **`/clear` (and a resume) moves them back** to the prompt box. Prompts written for the old conversation aren't sent into the new one, and a send scheduled before the `/clear` is cancelled. A held prompt the mod had already handed to Claude Code is checked again when Claude Code admits it (on 2.1.310 that can be after the `/clear`): if a `/clear` came first it is refused and kept under **Not sent**. One that Claude Code admitted before the `/clear` already started its turn in the old conversation. omp discards its queue here; this mod hands it back so nothing is lost. If the box can't take them, or a prompt was mid-send, they're kept under **Not sent** (below).
@@ -102,7 +102,8 @@ Nothing extra. The mod makes no model calls and adds nothing to the system promp
 - Held prompts live in session state: exiting the session loses them.
 - After a reload mid-send, a prompt can't be known sent or not; it is kept under **Not sent**, not resent.
 - `@file` mentions, attachments, IDE selections and hook-added context from the original submission don't survive a resend (see above). The first item of an idle `->` list is the exception: it goes through as your own prompt.
-- Claude Code 2.1.310 leaves a dropped prompt's text in the prompt box; the mod clears the box when it still holds exactly the held text. Text you typed after it is left alone, so you may have to clear a leftover by hand.
+- Claude Code 2.1.310 leaves a held prompt's text in the prompt box, so pressing Enter again sends it a second time. Clear the box yourself (the drop message says so). The mod can't clear it safely: the plugin interface has no "replace only if unchanged" write, and a blind replace could delete what you typed since.
+- Prompts handed back go after your draft, not ahead of it as in omp, for the same reason: adding after the draft is the only write that can't delete what you're typing. Pressing **Take back** twice therefore leaves the newest first.
 - Tested in the terminal only. The desktop app and VS Code may stamp prompts with a different origin.
 
 ## Develop

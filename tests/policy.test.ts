@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { joinForBox, parseQueueShorthand, splitQueuedMessages } from '../hooks/policy'
+import { appendText, parseQueueShorthand, splitQueuedMessages } from '../hooks/policy'
 
 describe('the -> and => shorthand', () => {
   test('takes the body after either prefix', () => {
@@ -52,8 +52,8 @@ describe('splitting a queued list', () => {
 })
 
 describe('the prompt box text', () => {
-  test('joins entries and the draft with blank lines, skipping an empty draft', () => {
-    expect(joinForBox(['a', 'b'], 'draft')).toBe('a\n\nb\n\ndraft')
-    expect(joinForBox(['a'], '')).toBe('a')
+  test('appends entries after the draft with blank lines between', () => {
+    expect(appendText(['a', 'b'], true)).toBe('\n\na\n\nb')
+    expect(appendText(['a'], false)).toBe('a')
   })
 })
