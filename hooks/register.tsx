@@ -26,23 +26,43 @@ const legacyRunningTurn = atom({ plugin: 'defer-queue', key: 'runningTurn' } as 
 // Live on 2.1.310, $.state is held per session id and /clear starts a new
 // one, so the queue reads empty after it. What must outlive the /clear (the
 // bumped epoch, Not sent) is carried in this module variable from session.end
-// and merged into the new session's state at its first access. A reload
-// between the /clear and that access loses the carry (module variables don't
-// survive one); README lists it.
+// and merged into the new session's state by a timer session.end starts
+// (live, 2.1.310: it fires in the new session, about 20 ms later), or by any
+// access before that. A reload inside that moment loses the carry (module
+// variables don't survive one); README lists it.
 let carry: { from: string; value: Queue } | null = null
 
-async function adoptCarry($: EngineInterface): Promise<void> {
+// Resolves whether nothing is left to carry.
+async function adoptCarry($: EngineInterface): Promise<boolean> {
   const c = carry
-  if (c === null) return
+  if (c === null) return true
   let id: string
   try {
     id = await $.session.id()
   } catch {
-    return
+    return false
   }
-  if (id === c.from || carry !== c) return
+  if (carry !== c) return carry === null
+  if (id === c.from) return false
   carry = null
   await update($, queue, q => mergeCarry(q, c.value))
+  return true
+}
+
+// The timer's waits: the first try is the next tick; later ones cover an
+// engine that switches the session id later than 2.1.310 does.
+const ADOPT_RETRIES_MS = [0, 100, 1000] as const
+
+function scheduleAdoption($: EngineInterface, attempt: number): void {
+  const wait = ADOPT_RETRIES_MS[attempt]
+  if (wait === undefined) return
+  $.clock.after(wait, () => void retryAdoption($, attempt))
+}
+
+async function retryAdoption($: EngineInterface, attempt: number): Promise<void> {
+  // A timer never throws: a failed try is retried, and any access adopts too.
+  const isDone = await adoptCarry($).catch(() => false)
+  if (!isDone) scheduleAdoption($, attempt + 1)
 }
 
 async function getQ($: EngineInterface): Promise<Queue> {
@@ -383,6 +403,7 @@ async function resetForNewConversation($: EngineInterface, why: 'clear' | 'resum
   })
   // This session's state is gone once the new one starts; carry what matters.
   carry = { from: sessionId, value: after }
+  scheduleAdoption($, 0)
   if (taken.length === 0) return
   const label = why === 'clear' ? '/clear' : 'Resume'
   if (await handBack($, taken.map(m => m.text))) {

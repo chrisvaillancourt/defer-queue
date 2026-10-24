@@ -142,8 +142,8 @@ describe('prompt box writes', () => {
 // Live on 2.1.310, $.state is held per session id, and /clear starts a new
 // one: the plugin's state reads empty after it. This stands in for that.
 function perSessionState(on: On) {
-  const sid = { value: 's1' }
   const stores: Record<string, Map<string, { value: unknown; version: number }>> = {}
+  const sid = { value: 's1', stores }
   const store = () => (stores[sid.value] ??= new Map())
   on('session.id', () => ({ value: sid.value }))
   on('state.get', ($, e) => ({ value: store().get(`${e.plugin}/${e.key}`) ?? { value: undefined, version: 0 } }))
@@ -210,6 +210,29 @@ describe('across a /clear that empties plugin state', () => {
     await $.turn.complete(ended('answer', 't2'))
     await settle()
     expect(sent).toEqual([])
+  })
+})
+
+// What a session's $.state holds for the queue: what survives a plugin reload,
+// which resets module variables.
+const storedQueue = (sid: ReturnType<typeof perSessionState>) =>
+  JSON.stringify(sid.stores[sid.value]?.get('defer-queue/queue')?.value ?? null)
+
+describe('the /clear transfer', () => {
+  test('is in the new session\'s state right after /clear, before anything reads the queue', async ($, on) => {
+    const { settle } = bottoms(on, () => ({ isFilled: false, refusal: 'dialog' }))
+    const sid = perSessionState(on)
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'work', turnId: 't1' })
+    await $.prompt.submit(typed('RECOVER_ME'))
+    await clear($, sid)
+    await settle()
+    // A reload here keeps only $.state: the Not sent entry must already be in
+    // the new session's, not only in a module variable.
+    expect(storedQueue(sid)).toContain('RECOVER_ME')
+    // The test kit's stand-in for the reload itself.
+    await $.session.start(SESSION)
+    expect((await list($)).text).toMatch(/Not sent[\s\S]*RECOVER_ME/)
   })
 })
 
