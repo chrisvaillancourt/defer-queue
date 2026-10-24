@@ -104,7 +104,7 @@ Nothing extra. The mod makes no model calls and adds nothing to the system promp
 - `@file` mentions, attachments, IDE selections and hook-added context from the original submission don't survive a resend (see above). The first item of an idle `->` list is the exception: it goes through as your own prompt.
 - Claude Code 2.1.310 leaves a held prompt's text in the prompt box, so pressing Enter again sends it a second time. Clear the box yourself (the drop message says so). The mod can't clear it safely: the plugin interface has no "replace only if unchanged" write, and a blind replace could delete what you typed since.
 - Prompts handed back go after your draft, not ahead of it as in omp, for the same reason: adding after the draft is the only write that can't delete what you're typing. Pressing **Take back** twice therefore leaves the newest first.
-- Upgrading from 0.1 keeps prompts 0.1 was holding, but not its idea of which turn was running (0.1 counted subagent turns too). If the upgrade lands mid-turn, that turn's end releases nothing; the next answered turn, or **Send next**, does.
+- Upgrading from 0.1 keeps prompts 0.1 was holding, but not its idea of which turn was running (0.1 counted subagent turns too). If the upgrade lands mid-turn, that turn's end releases nothing unless you hold another prompt during it (which tells the mod which turn is running); otherwise the next answered turn, or **Send next**, does.
 - Tested in the terminal only. The desktop app and VS Code may stamp prompts with a different origin.
 
 ## Develop
