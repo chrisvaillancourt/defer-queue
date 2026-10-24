@@ -34,12 +34,12 @@ const legacyRunningTurn = atom({ plugin: 'defer-queue', key: 'runningTurn' } as 
 // one, so the queue reads empty after it. What must outlive the /clear (the
 // bumped epoch, Not sent, handbacks still in flight) is the carry: from
 // session.end it is the queue's one current record, the one every change
-// applies to, until it is adopted into the new session's state. A timer
-// session.end starts adopts it (live, 2.1.310: it fires in the new session,
-// about 20 ms later); any access before that adopts it too. Changes are
+// applies to, until it is adopted into the new session's state. Timers
+// session.end starts adopt it once the session id has switched (see
+// scheduleAdoption); any access before that adopts it too. Changes are
 // mirrored into the old session's state while it is current, for an engine
 // that keeps it. A reload before adoption loses the carry (module variables
-// don't survive one); README lists it.
+// don't survive one), however long that takes; README lists it.
 let carry: { from: string; value: Queue } | null = null
 
 // Every state access runs one at a time, so a carry is created, changed and
@@ -99,20 +99,29 @@ async function adoptCarry($: EngineInterface): Promise<boolean> {
   })
 }
 
-// The timer's waits: the first try is the next tick; later ones cover an
-// engine that switches the session id later than 2.1.310 does.
-const ADOPT_RETRIES_MS = [0, 100, 1000] as const
+// Adoption keeps trying until ownership moves (the session id differs),
+// however long session.end's own work takes: a try every ADOPT_EVERY_MS for
+// up to ADOPT_FOR_MS after the last time it was scheduled. session.end
+// schedules it when the reset starts and again when its handback finishes,
+// so the bound runs from the end of the /clear. Any state access adopts too.
+const ADOPT_EVERY_MS = 100
+const ADOPT_FOR_MS = 10_000
+let adoptRun = 0
 
-function scheduleAdoption($: EngineInterface, attempt: number): void {
-  const wait = ADOPT_RETRIES_MS[attempt]
-  if (wait === undefined) return
-  $.clock.after(wait, () => void retryAdoption($, attempt))
+function scheduleAdoption($: EngineInterface): void {
+  const run = (adoptRun += 1)
+  tryAdoption($, run, 0, 0)
 }
 
-async function retryAdoption($: EngineInterface, attempt: number): Promise<void> {
-  // A timer never throws: a failed try is retried, and any access adopts too.
-  const isDone = await adoptCarry($).catch(() => false)
-  if (!isDone) scheduleAdoption($, attempt + 1)
+function tryAdoption($: EngineInterface, run: number, wait: number, waited: number): void {
+  $.clock.after(wait, () => {
+    // A timer never throws: a failed try counts as not done.
+    void adoptCarry($)
+      .catch(() => false)
+      .then(isDone => {
+        if (!isDone && run === adoptRun && waited < ADOPT_FOR_MS) tryAdoption($, run, ADOPT_EVERY_MS, waited + ADOPT_EVERY_MS)
+      })
+  })
 }
 
 const BAND_ROWS = 5
@@ -436,16 +445,21 @@ async function resetForNewConversation($: EngineInterface, why: 'clear' | 'resum
     // carry is the record, until the new session adopts it.
     carry = { from: sessionId, value: after }
   })
-  scheduleAdoption($, 0)
+  scheduleAdoption($)
   if (taken.length === 0) return
-  const label = why === 'clear' ? '/clear' : 'Resume'
-  if (await handBack($, taken.map(m => m.text))) {
-    toast($, `${label}: ${taken.length} queued prompt(s) moved back to the prompt box`)
-    return
+  try {
+    const label = why === 'clear' ? '/clear' : 'Resume'
+    if (await handBack($, taken.map(m => m.text))) {
+      toast($, `${label}: ${taken.length} queued prompt(s) moved back to the prompt box`)
+      return
+    }
+    const kept = taken
+    await updQ($, q => keepUnsent(q, kept))
+    toast($, `${label}: could not reach the prompt box; kept ${kept.length} queued prompt(s) under "Not sent" (/queue lists them)`)
+  } finally {
+    // The handback may have outlasted the first round of tries.
+    scheduleAdoption($)
   }
-  const kept = taken
-  await updQ($, q => keepUnsent(q, kept))
-  toast($, `${label}: could not reach the prompt box; kept ${kept.length} queued prompt(s) under "Not sent" (/queue lists them)`)
 }
 
 async function takeBackRecovery($: EngineInterface): Promise<void> {

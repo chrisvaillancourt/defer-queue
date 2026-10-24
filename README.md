@@ -99,7 +99,7 @@ Nothing extra. The mod makes no model calls and adds nothing to the system promp
 
 ## Limitations
 
-- Held prompts live in session state: exiting the session loses them. Claude Code empties a plugin's session state at `/clear`, so the mod carries **Not sent** across in memory and writes it into the new conversation's state right after the `/clear` (on 2.1.310, about 20 ms later). A plugin reload inside that moment loses the carried list.
+- Held prompts live in session state: exiting the session loses them. Claude Code empties a plugin's session state at `/clear`, so the mod carries **Not sent** across in memory until the new conversation's state takes it over, which happens once Claude Code has switched to the new conversation (usually within milliseconds of the `/clear` finishing; the mod keeps trying for 10 seconds after that, and any use of the queue takes it over too). A plugin reload before the takeover loses the carried list, however long the `/clear` took.
 - After a reload mid-send, a prompt can't be known sent or not; it is kept under **Not sent**, not resent.
 - `@file` mentions, attachments, IDE selections and hook-added context from the original submission don't survive a resend (see above). The first item of an idle `->` list is the exception: it goes through as your own prompt.
 - Claude Code 2.1.310 leaves a held prompt's text in the prompt box, so pressing Enter again sends it a second time. Clear the box yourself (the drop message says so). The mod can't clear it safely: the plugin interface has no "replace only if unchanged" write, and a blind replace could delete what you typed since.
