@@ -1,14 +1,16 @@
 # defer-queue
 
-A Claude Code plugin that holds a prompt you send while Claude is working and sends it only after Claude finishes the turn on its own, as a turn of its own. It never steers or interrupts the running turn.
+A Claude Code plugin that gives Claude Code [omp](https://github.com/can1357/oh-my-pi)'s follow-up queue: a prompt you queue while Claude is working is held and sent only after Claude finishes the turn on its own, as a turn of its own. It never steers or interrupts the running turn.
 
 Stock Claude Code folds a message you queue mid-turn into the running turn as soon as the current tool calls finish. The `chat:queueSubmit` key (default `ctrl+x enter`) marks a prompt "wait its turn", but the engine queues it the same way and leaves the flag for hooks to act on. This plugin acts on it.
 
 ## Use
 
-- **While Claude works, press `ctrl+x enter`** (or whatever you bind to `chat:queueSubmit`) instead of Enter. The prompt is held, and a line says `Deferred until Claude finishes this turn (n waiting)`. Plain Enter still steers as usual.
-- **`/defer <prompt>`** does the same from the command line. It works mid-turn. With nothing running, it sends right away, or behind prompts already waiting.
-- **`/defer`** with no text lists what's waiting.
+- **While Claude works, press `ctrl+x enter`** (or whatever you bind to `chat:queueSubmit`) instead of Enter. The prompt is held as one entry, and a line says `Queued until Claude finishes this turn (n waiting)`. Plain Enter still steers as usual.
+- **Start a prompt with `->` or `=>`** to queue it with plain Enter, as in omp. While Claude works it waits; while idle with nothing waiting, it goes out at once as your own prompt.
+- **`/queue <prompt>`** does the same from the command line, and works mid-turn. While idle it sends right away, or behind prompts already waiting. `/defer` is the same command, kept from 0.1.
+- **Lists split.** After `->`, `=>` or `/queue`, a numbered (`1.`), lettered (`a)`) or Roman-numeral (`iv.`) list of two or more items in sequence queues one prompt per item; lines under an item stay with it. A gap, mixed `.` and `)`, mixed case or an empty item inside the list keeps the whole text as one prompt; an empty last item is dropped. Prompts sent with `ctrl+x enter` alone are never split.
+- **`/queue`** with no text prints usage and lists what's waiting, including anything paused or kept under "Not sent".
 - **A band above the prompt** lists held prompts, with these buttons:
   - **Take back** puts the newest held prompt back in the prompt box, ahead of your draft with a blank line between, and leaves the turn running (omp's dequeue).
   - **Take back all** (shown with two or more held) puts them all back, oldest first.

@@ -29,12 +29,16 @@ function bottoms(on: On, answer: SubmitAnswer = text => ({ text }), canFill: () 
     return { value: undefined }
   })
   on('ui.status', () => ({ value: undefined }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  const registered: string[] = []
+  on('command.register', ($, e) => {
+    registered.push(e.name)
+    return { value: { command: e.name } }
+  })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('ui.render', ($, e) => { const { Box } = $.ui.resolve(e); return <Box /> })
-  return { submitted, filled, toasts, settle: clock.settle }
+  return { submitted, filled, toasts, registered, settle: clock.settle }
 }
 
 const typedMidTurn = (text: string, wait: boolean) => ({
@@ -59,9 +63,9 @@ async function startTurn($: Engine, turnId = 't1') {
 
 const SESSION = { cwd: '/tmp', surface: 'terminal', isInteractive: true } as const
 
-const run = ($: Engine, args: string) =>
+const run = ($: Engine, args: string, command: 'queue' | 'defer' = 'queue') =>
   $.command.run({
-    command: 'defer',
+    command,
     args,
     origin: { kind: 'composer' },
     presentation: { isFullscreen: true, columns: 120 },
@@ -271,13 +275,13 @@ describe('releasing held prompts', () => {
   })
 })
 
-describe('the /defer command', () => {
+describe('the /queue command', () => {
   test('holds its text while a turn runs', async ($, on) => {
     const { submitted, settle } = bottoms(on)
     await $.session.start(SESSION)
     await startTurn($)
     const out = await run($, 'review the diff')
-    expect(out.text).toMatch(/[Dd]eferred/)
+    expect(out.text).toMatch(/[Qq]ueued until Claude finishes/)
     expect(submitted).toEqual([])
     await $.turn.complete(endTurn('answer'))
     await settle()
@@ -292,13 +296,129 @@ describe('the /defer command', () => {
     expect(submitted.map(s => s.text)).toEqual(['review the diff'])
   })
 
-  test('with no text, lists what is held', async ($, on) => {
+  test('with no text, prints usage and lists what is held', async ($, on) => {
     bottoms(on)
     await $.session.start(SESSION)
     await startTurn($)
     await $.prompt.submit(typedMidTurn('first', true))
     const out = await run($, '')
-    expect(out.text).toMatch(/first/)
+    expect(out.text).toMatch(/^Usage: \/queue/)
+    expect(out.text).toMatch(/1\. first/)
+  })
+
+  test('is registered as /queue and as /defer', async ($, on) => {
+    const { registered } = bottoms(on)
+    await $.session.start(SESSION)
+    expect(registered.sort()).toEqual(['defer', 'queue'])
+  })
+
+  test('/defer behaves as /queue', async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    await $.session.start(SESSION)
+    await startTurn($)
+    await run($, '1. a\n2. b', 'defer')
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['a'])
+  })
+
+  test('splits a list into one prompt per item, sent one per finished turn', async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    await $.session.start(SESSION)
+    await startTurn($)
+    const out = await run($, '1. write the test\n   with a fixture\n2. make it pass')
+    expect(out.text).toMatch(/2 waiting/)
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    await startTurn($, 't2')
+    await $.turn.complete(endTurn('answer', undefined, 't2'))
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['write the test\n   with a fixture', 'make it pass'])
+  })
+
+  test('while idle, sends the first item now and holds the rest', async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    await $.session.start(SESSION)
+    await run($, 'a) one\nb) two')
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['one'])
+    expect((await run($, '')).text).toMatch(/1\. two/)
+  })
+})
+
+describe('the -> and => shorthand', () => {
+  test('a prompt starting with -> typed mid-turn is queued, even with plain Enter', async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    await startTurn($)
+    const result = await $.prompt.submit(typedMidTurn('-> then run the linter', false))
+    expect(result.drop).toMatch(/[Qq]ueued/)
+    expect(submitted).toEqual([])
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['then run the linter'])
+  })
+
+  test('=> with a list mid-turn queues one prompt per item', async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    await $.session.start(SESSION)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('=> 1. a\n2. b', false))
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['a'])
+    expect((await run($, '')).text).toMatch(/1\. b/)
+  })
+
+  test('while idle with nothing held, the first item goes through as typed and the rest wait', async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    await $.session.start(SESSION)
+    const result = await $.prompt.submit({ text: '-> 1. a\n2. b', wait: false, origin: { kind: 'composer' } })
+    expect(result.drop).toBeUndefined()
+    expect(submitted).toEqual([{ text: 'a', origin: { kind: 'composer' } }])
+    await startTurn($)
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['a', 'b'])
+  })
+
+  test('while idle with older prompts held, it waits behind them and the oldest is sent', async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    await $.session.start(SESSION)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('old', true))
+    await $.turn.complete(endTurn('error'))
+    const result = await $.prompt.submit({ text: '-> new', wait: false, origin: { kind: 'composer' } })
+    expect(result.drop).toBeDefined()
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['old'])
+    expect((await run($, '')).text).toMatch(/1\. new/)
+  })
+
+  test('an empty -> queues nothing and shows usage', async ($, on) => {
+    const { submitted } = bottoms(on)
+    await startTurn($)
+    const result = await $.prompt.submit(typedMidTurn('->', false))
+    expect(result.drop).toMatch(/Usage: \/queue/)
+    expect(submitted).toEqual([])
+  })
+
+  test('a wait-marked list without the shorthand stays one prompt', async ($, on) => {
+    const { submitted, settle } = bottoms(on)
+    await startTurn($)
+    await $.prompt.submit(typedMidTurn('1. a\n2. b', true))
+    await $.turn.complete(endTurn('answer'))
+    await settle()
+    expect(submitted.map(s => s.text)).toEqual(['1. a\n2. b'])
+  })
+
+  test("-> from a notification, peer or schedule is left alone", async ($, on) => {
+    const { submitted } = bottoms(on)
+    await startTurn($)
+    for (const kind of ['task-notification', 'peer', 'scheduled-trigger', 'sdk'] as const) {
+      const result = await $.prompt.submit({ text: '-> x', wait: false, turnId: 't1', origin: { kind } })
+      expect(result.drop).toBeUndefined()
+    }
+    expect(submitted.length).toBe(4)
   })
 })
 
@@ -381,11 +501,11 @@ describe('what a resend cannot carry', () => {
     expect(submitted.map(s => s.text)).toEqual(['/compact keep', '  /compact keep', '!ls'])
   })
 
-  test('/defer refuses a slash command or shell line', async ($, on) => {
+  test('/queue refuses a slash command or shell line', async ($, on) => {
     const { submitted, settle } = bottoms(on)
     await $.session.start(SESSION)
     const out = await run($, '/compact keep')
-    expect(out.text).toMatch(/can't defer/i)
+    expect(out.text).toMatch(/can't queue/i)
     await settle()
     expect(submitted).toEqual([])
   })

@@ -1,7 +1,17 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PromptOrigin, Register } from 'claude-code'
 
-import { EMPTY, firstLine, insertBySeq, isCommandLike, joinForBox, listText } from './policy'
+import {
+  EMPTY,
+  USAGE,
+  firstLine,
+  insertBySeq,
+  isCommandLike,
+  joinForBox,
+  listText,
+  parseQueueShorthand,
+  splitQueuedMessages,
+} from './policy'
 import type { Entry, Queue } from '../types'
 
 // The whole queue in one record (see AGENTS.md). Change the shape tag when
@@ -118,10 +128,10 @@ async function settleRelease($: EngineInterface, token: string, failure: string 
   toast(
     $,
     where === 'box'
-      ? `Deferred prompt not sent (${failure}); it is back in the prompt box`
+      ? `Queued prompt not sent (${failure}); it is back in the prompt box`
       : where === 'queue'
-        ? `Deferred prompt not sent (${failure}); kept it first in the queue, which is paused`
-        : `Deferred prompt not sent (${failure}); kept it under "Not sent"`,
+        ? `Queued prompt not sent (${failure}); kept it first in the queue, which is paused`
+        : `Queued prompt not sent (${failure}); kept it under "Not sent"`,
   )
 }
 
@@ -151,22 +161,34 @@ async function adoptOnLoad($: EngineInterface): Promise<void> {
   if (oldRunning !== null) await update($, legacyRunningTurn, () => null)
 }
 
-async function runDefer($: EngineInterface, args: string): Promise<{ text: string }> {
-  const text = args.trim()
-  if (text === '') return { text: listText(await read($, queue)) }
-  if (isCommandLike(text)) {
-    return { text: "Can't defer a slash command or shell line. Type it while Claude works; Claude Code already runs it after the turn." }
-  }
-  const q = await hold($, [text])
+const CANT_QUEUE_COMMAND =
+  "Can't queue a slash command or shell line. Type it while Claude works; Claude Code already runs it after the turn."
+
+// Queues entries at the back and says what happens next. While the main loop
+// is idle the oldest entry is sent now, so queue input never overtakes older
+// held work. The host refuses a submit from inside command.run and
+// prompt.submit (it would wait on that hook), so a timer sends it.
+async function queueEntries($: EngineInterface, entries: readonly string[], turnId?: string): Promise<string> {
+  const q = await hold($, entries, turnId)
   const count = q.items.length
-  if (q.runningTurn !== null) return { text: `Deferred until Claude finishes this turn (${count} waiting).` }
-  if (q.paused) return { text: `Queued (${count} waiting). The queue is paused: press Send next to resume.` }
-  if (q.claim !== null) return { text: `Queued behind the prompt being sent (${count} waiting).` }
-  // Nothing is running: send the oldest now. The host refuses a submit from
-  // inside command.run (it would wait on this run), so a timer sends it.
+  const n = entries.length
+  const what = n === 1 ? 'Queued' : `Queued ${n}`
+  if (q.runningTurn !== null) return `${what} until Claude finishes this turn (${count} waiting).`
+  if (q.paused) return `${what} (${count} waiting). The queue is paused: press Send next to resume.`
+  if (q.claim !== null) return `${what} behind the prompt being sent (${count} waiting).`
   const epoch = q.epoch
   $.clock.after(0, () => void releaseNext($, 'auto', epoch))
-  return { text: count === 1 ? 'Nothing is running; sending it now.' : `Queued behind ${count - 1}; sending the oldest now.` }
+  if (count > n) return `${what} behind ${count - n}; sending the oldest now.`
+  return n === 1 ? 'Nothing is running; sending it now.' : `Nothing is running; sending the first now (${n - 1} waiting).`
+}
+
+// /queue and its alias /defer.
+async function runQueue($: EngineInterface, args: string): Promise<{ text: string }> {
+  const body = args.trim()
+  if (body === '') return { text: `${USAGE}\n\n${listText(await read($, queue))}` }
+  const entries = splitQueuedMessages(body)
+  if (entries.some(isCommandLike)) return { text: CANT_QUEUE_COMMAND }
+  return { text: await queueEntries($, entries) }
 }
 
 async function takeAllItems($: EngineInterface): Promise<Entry[]> {
@@ -182,7 +204,7 @@ async function takeBackAll($: EngineInterface): Promise<void> {
   const taken = await takeAllItems($)
   if (await handBack($, taken.map(m => m.text))) return
   await update($, queue, q => ({ ...q, items: insertBySeq(q.items, taken) }))
-  toast($, 'Could not reach the prompt box; kept the deferred prompts')
+  toast($, 'Could not reach the prompt box; kept the queued prompts')
 }
 
 // omp's dequeue: the newest entry alone back into the prompt box, the turn
@@ -200,7 +222,7 @@ async function takeBackNewest($: EngineInterface): Promise<void> {
     return
   }
   await update($, queue, q => ({ ...q, items: insertBySeq(q.items, [entry]) }))
-  toast($, 'Could not reach the prompt box; kept the deferred prompt')
+  toast($, 'Could not reach the prompt box; kept the queued prompt')
 }
 
 // omp's Esc: an interrupted main turn hands every queued entry back, oldest
@@ -211,7 +233,7 @@ async function restoreAfterAbort($: EngineInterface): Promise<void> {
   if (taken.length === 0) return
   if (await handBack($, taken.map(m => m.text))) return
   await update($, queue, q => ({ ...q, items: insertBySeq(q.items, taken), paused: true }))
-  toast($, `Turn interrupted; could not reach the prompt box, so ${taken.length} deferred prompt(s) wait, paused`)
+  toast($, `Turn interrupted; could not reach the prompt box, so ${taken.length} queued prompt(s) wait, paused`)
 }
 
 export const register: Register = (on, options) => {
@@ -220,8 +242,14 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await adoptOnLoad($)
     await $.command.register({
+      name: 'queue',
+      description: 'Queue a prompt (or a numbered list, one per item) for after Claude finishes the turn; alone, usage and the queue',
+      argumentHint: '[prompt]',
+      immediate: true,
+    })
+    await $.command.register({
       name: 'defer',
-      description: 'Send a prompt once Claude finishes the current turn; with no text, list what is waiting',
+      description: 'Same as /queue',
       argumentHint: '[prompt]',
       immediate: true,
     })
@@ -229,15 +257,32 @@ export const register: Register = (on, options) => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    if (!isPersons(e.origin) || isCommandLike(e.text)) return next(e)
     const isMidTurn = e.turnId !== undefined
-    const wantsToWait = e.wait || deferAll
-    if (!isMidTurn || !wantsToWait || !isPersons(e.origin) || isCommandLike(e.text)) return next(e)
+    const body = parseQueueShorthand(e.text)
+    // Without the shorthand, only a mid-turn prompt marked to wait is held,
+    // as one entry.
+    if (body === undefined && (!isMidTurn || !(e.wait || deferAll))) return next(e)
     if (e.attachments !== undefined && e.attachments.length > 0) {
-      toast($, 'prompts with attachments are not deferred; this one goes to the turn now')
+      toast($, 'prompts with attachments are not queued (a resend would lose them); this one goes through now')
       return next(e)
     }
-    const q = await hold($, [e.text], e.turnId)
-    return { drop: `Deferred until Claude finishes this turn (${q.items.length} waiting)` }
+    if (body === undefined) return { drop: await queueEntries($, [e.text], e.turnId) }
+    const entries = splitQueuedMessages(body)
+    if (entries.length === 0) return { drop: USAGE }
+    if (entries.some(isCommandLike)) return { drop: CANT_QUEUE_COMMAND }
+    if (!isMidTurn) {
+      const q = await read($, queue)
+      const [first, ...rest] = entries
+      if (first !== undefined && q.runningTurn === null && q.items.length === 0 && q.claim === null && !q.paused) {
+        // Nothing waits: the first entry goes through as the person's own
+        // prompt (keeping @-mentions and hook context); the rest wait for it.
+        const result = await next({ ...e, text: first })
+        if (result.drop === undefined && rest.length > 0) await hold($, rest)
+        return result
+      }
+    }
+    return { drop: await queueEntries($, entries, e.turnId) }
   }).catch(($, e, next) => next(e)) // Fails open: a prompt the queue couldn't take goes to the turn, never lost.
 
   on('turn.start', async ($, e, next) => {
@@ -274,15 +319,16 @@ export const register: Register = (on, options) => {
         toast(
           $,
           isBack
-            ? `/clear: ${taken.length} deferred prompt(s) moved back to the prompt box`
-            : `/clear: discarded ${taken.length} deferred prompt(s): ${taken.map(m => firstLine(m.text)).join(' | ')}`,
+            ? `/clear: ${taken.length} queued prompt(s) moved back to the prompt box`
+            : `/clear: discarded ${taken.length} queued prompt(s): ${taken.map(m => firstLine(m.text)).join(' | ')}`,
         )
       }
     }
     return next(e)
   })
 
-  on('command.run', { command: 'defer' }, async ($, e) => runDefer($, e.args))
+  on('command.run', { command: 'queue' }, async ($, e) => runQueue($, e.args))
+  on('command.run', { command: 'defer' }, async ($, e) => runQueue($, e.args))
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || e.props.view.agentId !== undefined) return next(e)
@@ -301,7 +347,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         <Text dimColor>
-          Deferred {status} ({list.length}):
+          Queued {status} ({list.length}):
         </Text>
         {shown.map((m, i) => (
           <Text wrap="truncate-end">
