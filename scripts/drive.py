@@ -225,11 +225,14 @@ def main() -> int:
 
     try:
         # The trust dialog defaults to "No, exit": move to "Yes" explicitly.
+        # Keys sent as soon as it draws are lost (Enter then exits), so wait
+        # for it to settle first.
         for _ in range(40):
             s.pump(0.5)
             if s.screen_has("Enter to confirm"):
-                s.key("\x1b[B", gap=0.8)
-                s.key("\r", gap=1.0)
+                s.pump(3)
+                s.key("\x1b[B", gap=1.5)
+                s.key("\r", gap=2.0)
                 break
         if not wait_for(s, out, lambda r: any(x["ev"] == "session.start" for x in r), 30):
             expect(False, "session started (observer saw session.start)")
