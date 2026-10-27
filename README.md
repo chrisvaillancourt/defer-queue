@@ -68,7 +68,7 @@ claude plugin install defer-queue@defer-queue --scope user
 
 Or from inside Claude Code: `/plugin install defer-queue --marketplace chrisvaillancourt/defer-queue`.
 
-To work on it locally, run a session with your clone loaded: `claude --plugin-dir <path to clone>` (that session only; saving a file reloads it; see Develop for the flag that keeps an installed copy from loading too). An installed copy, even one installed from a local clone with `claude plugin marketplace add <path to clone>`, is a snapshot under `~/.claude/plugins/cache/`; edits to the clone reach it only after you bump `version` in `.claude-plugin/plugin.json` and run `claude plugin marketplace update defer-queue` and `claude plugin update defer-queue@defer-queue`. Then restart Claude Code.
+To work on it locally, add your clone as the marketplace instead (`claude plugin marketplace add <path to clone>`). The plugin is read from that folder; after editing, run `/reload-plugins`.
 
 To uninstall, run `claude plugin uninstall defer-queue@defer-queue`.
 
