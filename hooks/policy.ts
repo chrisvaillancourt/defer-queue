@@ -1,6 +1,6 @@
 // Pure decisions and text for defer-queue: no `$`, no I/O.
 
-import type { Entry, Queue } from '../types'
+import type { Entry, Queue, SavedQueue } from '../types'
 
 export const EMPTY: Queue = {
   epoch: 0,
@@ -136,6 +136,74 @@ export function keepRefusedRelease(q: Queue, token: string | undefined, text: st
   if (token !== undefined && q.claim?.token === token) return q
   if (q.recovery.some(r => r.token !== undefined && r.text === text)) return unmark(r => r.token !== undefined && r.text === text)
   return { ...q, nextSeq: q.nextSeq + 1, recovery: [...q.recovery, { seq: q.nextSeq, text }] }
+}
+
+// ---- The store record: what outlives the process ($.state doesn't) -------
+
+/** A queue nothing ever used: nothing held, cleared or kept. A new process reads one. */
+export function isUntouched(q: Queue): boolean {
+  return (
+    q.epoch === 0 &&
+    q.nextSeq === 1 &&
+    q.items.length === 0 &&
+    q.claim === null &&
+    q.recovery.length === 0 &&
+    q.pending.length === 0
+  )
+}
+
+/**
+ * The store record of `q` (less `at`), or null when nothing in it would be
+ * lost: every unsettled entry, without turn ids or release tokens, which
+ * name things in the process that wrote it.
+ */
+export function savedOf(q: Queue): Omit<SavedQueue, 'at'> | null {
+  const pending = q.pending.flatMap(p => p.entries)
+  if (q.items.length === 0 && q.claim === null && q.recovery.length === 0 && pending.length === 0) return null
+  const entry = (e: Entry): Entry => ({ seq: e.seq, text: e.text })
+  return {
+    v: 1,
+    items: q.items.map(entry),
+    claim: q.claim === null ? null : entry(q.claim.entry),
+    recovery: q.recovery.map(r => (r.maybeSent === true ? { ...entry(r), maybeSent: true as const } : entry(r))),
+    pending: pending.map(entry),
+  }
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+const isSeq = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0
+const isEntry = (v: unknown): v is Entry => isRecord(v) && isSeq(v.seq) && typeof v.text === 'string'
+const isEntries = (v: unknown): v is Entry[] => Array.isArray(v) && v.every(isEntry)
+const isMark = (v: unknown) => !isRecord(v) || v.maybeSent === undefined || v.maybeSent === true
+
+/** A store record read back, or undefined when it isn't one this version wrote (older, newer, corrupted). */
+export function parseSaved(v: unknown): SavedQueue | undefined {
+  if (!isRecord(v) || v.v !== 1 || typeof v.at !== 'number' || !Number.isFinite(v.at)) return undefined
+  if (!isEntries(v.items) || !isEntries(v.pending)) return undefined
+  if (v.claim !== null && !isEntry(v.claim)) return undefined
+  if (!isEntries(v.recovery) || !v.recovery.every(isMark)) return undefined
+  return v as SavedQueue
+}
+
+/**
+ * A new process found `saved`: every entry in it goes under Not sent, oldest
+ * first, and none back into the queue. The old process may already have sent
+ * its claim (marked so), and nothing goes out unseen. They are numbered
+ * after `q`'s own entries (the record's numbers belong to another queue, and
+ * Not sent keeps one entry per number). `count` is how many.
+ */
+export function restoreSaved(q: Queue, saved: SavedQueue): { next: Queue; count: number } {
+  const claimed = saved.claim === null ? [] : [{ ...saved.claim, maybeSent: true as const }]
+  const entries = [...saved.items, ...claimed, ...saved.recovery, ...saved.pending].sort((a, b) => a.seq - b.seq)
+  const restored = entries.map((e, i) => ({
+    seq: q.nextSeq + i,
+    text: e.text,
+    ...('maybeSent' in e && e.maybeSent === true ? { maybeSent: true as const } : {}),
+  }))
+  return {
+    next: { ...q, nextSeq: q.nextSeq + restored.length, recovery: [...q.recovery, ...restored] },
+    count: restored.length,
+  }
 }
 
 /** Puts entries back in `seq` order, so a returned entry lands ahead of newer ones. */

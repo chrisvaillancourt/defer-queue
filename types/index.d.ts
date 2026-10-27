@@ -36,6 +36,24 @@ export type Queue = {
   pending: Pending[]
 }
 
+/**
+ * What `$.store` keeps of a session's queue under `queue/<session id>`, so a
+ * new process (where `$.state` reads empty) can put it under Not sent: every
+ * entry the person typed that isn't settled. Nothing that names the old
+ * process (turn ids, release tokens); `seq` only orders, and a restore
+ * renumbers. `at` is when it was written, for pruning.
+ */
+export type SavedQueue = {
+  v: 1
+  at: number
+  items: Entry[]
+  /** The entry a release submitted and never saw confirmed: it may have gone out. */
+  claim: Entry | null
+  recovery: (Entry & { maybeSent?: true })[]
+  /** Entries on their way back to the prompt box. */
+  pending: Entry[]
+}
+
 /** The 0.1 entry shape, read once to carry a held queue across the upgrade. */
 export type DeferredPrompt = { id: string; text: string }
 

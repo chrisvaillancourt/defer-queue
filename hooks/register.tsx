@@ -9,18 +9,22 @@ import {
   admitsRelease,
   insertBySeq,
   isCommandLike,
+  isUntouched,
   appendText,
   keepRefusedRelease,
   keepUnsent,
   listText,
   mergeCarry,
   ownerOf,
+  parseSaved,
   resetQueue,
+  restoreSaved,
+  savedOf,
   settleHandback,
   parseQueueShorthand,
   splitQueuedMessages,
 } from './policy'
-import type { Entry, Queue } from '../types'
+import type { Entry, Queue, SavedQueue } from '../types'
 
 // The whole queue in one record (see AGENTS.md). Change the shape tag when
 // Queue's fields change: a value an older version stored then reads as EMPTY.
@@ -61,22 +65,177 @@ async function currentSessionId($: EngineInterface): Promise<string | undefined>
   }
 }
 
-// Applies a change to the record that owns the queue now. Callers hold the
-// chain (serially).
+// ---- The store record: what outlives the process -------------------------
+//
+// $.state survives a hot reload but not a new process (a background session
+// moved by an upgrade, a crash, exiting and resuming). Every change to a
+// session's queue is written through to $.store under `queue/<session id>`
+// (shared by every session, so keyed per session), and deleted once nothing
+// in it would be lost. A session whose state is untouched (see isUntouched)
+// but has a record is in a new process: the record's prompts go under Not
+// sent, never back into the queue, and the person is told. A hot reload finds
+// its state intact and restores nothing. The record follows the queue's
+// owner: a /clear carry adopted into a new session id moves it there.
+const SAVED_PREFIX = 'queue/'
+const DAY_MS = 24 * 60 * 60 * 1000
+// Another session's record older than this is dropped at session.start.
+const SAVED_TTL_MS = 7 * DAY_MS
+// An unchanged record is rewritten (for its `at`) at most this often.
+const SAVED_REFRESH_MS = DAY_MS
+
+const savedKey = (sessionId: string) => `${SAVED_PREFIX}${sessionId}`
+
+// Session ids whose record this module has read, and restored if their state
+// was untouched. Until then the write-through leaves the record alone, so a
+// change made before the check can't overwrite what a dead process left.
+const checkedSaved = new Set<string>()
+// What this module last wrote per key (null: deleted), to skip rewrites.
+const lastSaved = new Map<string, { text: string; at: number } | null>()
+
+// The record to restore for `sessionId`, read once per module: `isRead` false
+// when the store couldn't be read (the id stays unchecked and isn't written).
+async function readSaved(
+  $: EngineInterface,
+  sessionId: string | undefined,
+): Promise<{ isRead: boolean; saved: SavedQueue | undefined }> {
+  if (sessionId === undefined) return { isRead: false, saved: undefined }
+  if (checkedSaved.has(sessionId)) return { isRead: true, saved: undefined }
+  try {
+    return { isRead: true, saved: parseSaved(await $.store.get(savedKey(sessionId))) }
+  } catch {
+    return { isRead: false, saved: undefined }
+  }
+}
+
+function withSaved(q: Queue, base: Queue, saved: SavedQueue | undefined): { next: Queue; count: number } {
+  return saved !== undefined && isUntouched(q) ? restoreSaved(base, saved) : { next: base, count: 0 }
+}
+
+// Writes `q`'s record for `sessionId`, or deletes it when nothing is left to
+// keep. Best effort: a store failure never fails the change.
+async function writeSaved($: EngineInterface, sessionId: string | undefined, q: Queue): Promise<void> {
+  if (sessionId === undefined || !checkedSaved.has(sessionId)) return
+  const key = savedKey(sessionId)
+  const body = savedOf(q)
+  try {
+    if (body === null) {
+      if (lastSaved.get(key) === null) return
+      await $.store.delete(key)
+      lastSaved.set(key, null)
+      return
+    }
+    const text = JSON.stringify(body)
+    const at = await $.clock.now()
+    const last = lastSaved.get(key)
+    if (last != null && last.text === text && at - last.at < SAVED_REFRESH_MS) return
+    await $.store.set(key, { ...body, at })
+    lastSaved.set(key, { text, at })
+  } catch {
+    lastSaved.delete(key)
+  }
+}
+
+async function forgetSaved($: EngineInterface, sessionId: string): Promise<void> {
+  const key = savedKey(sessionId)
+  try {
+    await $.store.delete(key)
+    lastSaved.set(key, null)
+  } catch {
+    lastSaved.delete(key)
+  }
+}
+
+// After a write to `sessionId`'s state: mark its record checked, write it
+// through, and say what a restore put under Not sent.
+async function afterStateWrite(
+  $: EngineInterface,
+  sessionId: string | undefined,
+  read: { isRead: boolean },
+  q: Queue,
+  restored: number,
+): Promise<void> {
+  if (read.isRead && sessionId !== undefined) checkedSaved.add(sessionId)
+  await writeSaved($, sessionId, q)
+  if (restored > 0) reportRestored($, restored)
+}
+
+// Typed input came back from a dead process: the band shows it only when
+// someone looks, so it is also logged, toasted and sent as a notification
+// (which a detached background session's Notification hooks still get).
+function reportRestored($: EngineInterface, n: number): void {
+  const what = n === 1 ? '1 prompt you queued is' : `${n} prompts you queued are`
+  try {
+    $.ui.log(
+      `a restart of the session's process (an upgrade, a crash, or exiting and resuming) interrupted the queue: ${what} under "Not sent", and none was sent again. Press "Put back in prompt box" to edit and send them, or "Drop"; /queue lists them.`,
+    )
+  } catch {
+    // Reporting is best effort.
+  }
+  toast($, `A restart interrupted the queue: ${what} under "Not sent"`)
+  try {
+    void $.ui.notify(`A restart interrupted the queue: ${what} under "Not sent", waiting for you to put them back.`).catch(
+      () => undefined,
+    )
+  } catch {
+    // Reporting is best effort.
+  }
+}
+
+// Drops records sessions left behind more than SAVED_TTL_MS ago, and any that
+// don't read as one. Only this prefix's keys.
+async function pruneSaved($: EngineInterface): Promise<void> {
+  try {
+    const cutoff = (await $.clock.now()) - SAVED_TTL_MS
+    for (const key of await $.store.keys()) {
+      if (!key.startsWith(SAVED_PREFIX)) continue
+      const saved = parseSaved(await $.store.get(key))
+      if (saved !== undefined && saved.at >= cutoff) continue
+      await $.store.delete(key)
+      lastSaved.set(key, null)
+    }
+  } catch {
+    // Best effort.
+  }
+}
+
+// Applies a change to the record that owns the queue now, and writes it
+// through to the store. Callers hold the chain (serially).
 async function applyToOwner($: EngineInterface, change: (q: Queue) => Queue): Promise<Queue> {
   const c = carry
-  if (c === null) return update($, queue, change)
-  if (ownerOf(c.from, await currentSessionId($)) === 'carry') {
+  const sessionId = await currentSessionId($)
+  if (c === null) {
+    const read = await readSaved($, sessionId)
+    let restored = 0
+    const next = await update($, queue, q => {
+      const r = withSaved(q, q, read.saved)
+      restored = r.count
+      return change(r.next)
+    })
+    await afterStateWrite($, sessionId, read, next, restored)
+    return next
+  }
+  if (ownerOf(c.from, sessionId) === 'carry') {
     c.value = change(c.value)
     try {
       await update($, queue, q => (carry === c ? c.value : q))
     } catch {
       // The mirror is best effort: the carry is the record.
     }
+    await writeSaved($, sessionId, c.value)
     return c.value
   }
-  const adopted = await update($, queue, q => change(mergeCarry(q, c.value)))
+  // Adoption: the record moves to the new session id. A /resume into a session
+  // a dead process left a record for keeps that record's prompts too.
+  const read = await readSaved($, sessionId)
+  let restored = 0
+  const adopted = await update($, queue, q => {
+    const r = withSaved(q, mergeCarry(q, c.value), read.saved)
+    restored = r.count
+    return change(r.next)
+  })
   if (carry === c) carry = null
+  await afterStateWrite($, sessionId, read, adopted, restored)
+  if (sessionId !== c.from) await forgetSaved($, c.from)
   return adopted
 }
 
@@ -480,7 +639,10 @@ export const register: Register = (on, options) => {
   const deferAll = options.defer_all_mid_turn === true
 
   on('session.start', async ($, e, next) => {
+    // In a new process this also restores the session's store record (the
+    // first state write checks it), before anything else writes the record.
     await adoptOnLoad($)
+    await pruneSaved($)
     await $.command.register({
       name: 'queue',
       description: 'Queue a prompt (or a numbered list, one per item) for after Claude finishes the turn; alone, usage and the queue',

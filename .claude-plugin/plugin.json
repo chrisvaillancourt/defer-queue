@@ -1,6 +1,6 @@
 {
   "name": "defer-queue",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "omp-style follow-up queue: hold a prompt sent mid-turn (ctrl+x enter, -> / =>, or /queue) until Claude finishes the turn, then send it as a turn of its own (no steering).",
   "author": {
     "name": "Chris Vaillancourt"

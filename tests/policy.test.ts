@@ -5,12 +5,16 @@ import {
   abandonInFlight,
   admitsRelease,
   appendText,
+  isUntouched,
   keepRefusedRelease,
   keepUnsent,
   mergeCarry,
   ownerOf,
   parseQueueShorthand,
+  parseSaved,
   resetQueue,
+  restoreSaved,
+  savedOf,
   settleHandback,
   splitQueuedMessages,
 } from '../hooks/policy'
@@ -194,5 +198,82 @@ describe('admitting an own release', () => {
     expect(keepRefusedRelease({ ...EMPTY, nextSeq: 5 }, undefined, 'X').recovery).toEqual([{ seq: 5, text: 'X' }])
     // A standing claim is left for its settlement to finish.
     expect(keepRefusedRelease(claimed, 'r2', 'A')).toEqual(claimed)
+  })
+})
+
+describe('the record kept in the store', () => {
+  const A = { seq: 3, text: 'waiting A' }
+  const B = { seq: 4, text: 'waiting B' }
+  const C = { seq: 2, text: 'being sent' }
+  const D = { seq: 1, text: 'not sent' }
+  const H = { seq: 5, text: 'on its way back' }
+
+  test('keeps the waiting items, the claimed entry, Not sent and handbacks, without turn ids or tokens', () => {
+    const q: Queue = {
+      ...EMPTY,
+      epoch: 2,
+      nextSeq: 6,
+      runningTurn: 'turn-9',
+      items: [A, B],
+      claim: { entry: C, token: 'tok-1', epoch: 2 },
+      paused: true,
+      recovery: [{ ...D, token: 'tok-0', maybeSent: true }],
+      pending: [{ id: 'h1', epoch: 2, entries: [H], wasPaused: false, pauseOnFail: false }],
+    }
+    expect(savedOf(q)).toEqual({ v: 1, items: [A, B], claim: C, recovery: [{ ...D, maybeSent: true }], pending: [H] })
+  })
+
+  test('is nothing when there is nothing to keep', () => {
+    expect(savedOf(EMPTY)).toBeNull()
+    expect(savedOf({ ...EMPTY, epoch: 4, nextSeq: 9, runningTurn: 't', paused: true })).toBeNull()
+  })
+
+  test('reads back only a well-formed record', () => {
+    const good = { v: 1, at: 5, items: [A], claim: C, recovery: [{ ...D, maybeSent: true }], pending: [] }
+    expect(parseSaved(good)).toEqual(good)
+    expect(parseSaved({ ...good, claim: null })).toEqual({ ...good, claim: null })
+    for (const bad of [
+      undefined,
+      null,
+      'text',
+      [],
+      { ...good, v: 2 },
+      { ...good, at: 'now' },
+      { ...good, at: undefined },
+      { ...good, items: [{ seq: 1 }] },
+      { ...good, items: 'A' },
+      { ...good, claim: { text: 'x' } },
+      { ...good, recovery: [{ seq: 1, text: 'x', maybeSent: 'yes' }] },
+      { ...good, pending: [{ seq: 1.5, text: 'x' }] },
+    ]) {
+      expect(parseSaved(bad)).toBeUndefined()
+    }
+  })
+
+  test('restores everything under Not sent in seq order, the claimed entry marked, and never into the queue', () => {
+    const saved = { v: 1 as const, at: 0, items: [A, B], claim: C, recovery: [D], pending: [H] }
+    const { next, count } = restoreSaved(EMPTY, saved)
+    expect(count).toBe(5)
+    expect(next.items).toEqual([])
+    expect(next.claim).toBeNull()
+    expect(next.recovery.map(r => r.text)).toEqual([D.text, C.text, A.text, B.text, H.text])
+    expect(next.recovery.filter(r => r.maybeSent === true).map(r => r.text)).toEqual([C.text])
+    // New entries are numbered after the restored ones, so none is merged away.
+    expect(next.nextSeq).toBe(6)
+  })
+
+  test("renumbers what it restores after the queue's own entries, so a /clear carry merged into it loses none", () => {
+    const own: Queue = { ...EMPTY, nextSeq: 4, recovery: [{ seq: 1, text: 'carried' }] }
+    const { next } = restoreSaved(own, { v: 1, at: 0, items: [{ seq: 1, text: 'restored' }], claim: null, recovery: [], pending: [] })
+    expect(next.recovery).toEqual([{ seq: 1, text: 'carried' }, { seq: 4, text: 'restored' }])
+    expect(next.nextSeq).toBe(5)
+  })
+
+  test('a queue is untouched until something was ever held, sent, cleared or kept', () => {
+    expect(isUntouched(EMPTY)).toBe(true)
+    expect(isUntouched({ ...EMPTY, runningTurn: 't1' })).toBe(true)
+    expect(isUntouched({ ...EMPTY, nextSeq: 2 })).toBe(false)
+    expect(isUntouched({ ...EMPTY, epoch: 1 })).toBe(false)
+    expect(isUntouched({ ...EMPTY, recovery: [D] })).toBe(false)
   })
 })
