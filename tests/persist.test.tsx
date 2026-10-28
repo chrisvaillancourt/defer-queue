@@ -69,7 +69,11 @@ function world(on: On, opts: Opts = {}) {
     return { value: { isSet: true, version: version + 1 } }
   })
   const store = new Map<string, unknown>(Object.entries(opts.store ?? {}))
-  on('store.get', ($, e) => (opts.storeFails ? { deny: 'store unreadable' } : { value: store.get(e.key) }))
+  // A test turns this on to make reads of one key fail for a while.
+  const unreadable = new Set<string>()
+  on('store.get', ($, e) =>
+    opts.storeFails || unreadable.has(e.key) ? { deny: 'store unreadable' } : { value: store.get(e.key) },
+  )
   on('store.set', ($, e) => {
     if (opts.storeFails) return { deny: 'store full' }
     store.set(e.key, JSON.parse(JSON.stringify(e.value)))
@@ -81,7 +85,7 @@ function world(on: On, opts: Opts = {}) {
     return { value: undefined }
   })
   on('store.keys', () => (opts.storeFails ? { deny: 'store unreadable' } : { value: [...store.keys()] }))
-  return { clock, sid, sent, logs, toasts, notes, states, store }
+  return { clock, sid, sent, logs, toasts, notes, states, store, unreadable }
 }
 
 const restartLogs = (logs: readonly string[]) => logs.filter(l => /restart/i.test(l))
@@ -259,4 +263,41 @@ test('a store that refuses every call leaves the queue working', async ($, on) =
   await w.clock.settle()
   expect(w.sent).toEqual(['STILL_QUEUED'])
   expect(w.notes).toEqual([])
+})
+
+test("a store read that fails at first never lets the new process overwrite the dead one's record", async ($, on) => {
+  const dead = { v: 1, at: T0 - 60_000, items: [{ seq: 1, text: 'DEAD_A' }], claim: null, recovery: [], pending: [] }
+  const w = world(on, { store: { 'queue/s1': dead } })
+  w.unreadable.add('queue/s1')
+  await $.session.start(SESSION)
+  await $.turn.start({ text: 'resumed', turnId: 't1' })
+  await $.prompt.submit(typed('NEW'))
+  // Until the record is read, it stays as the dead process left it.
+  expect(w.store.get('queue/s1')).toEqual(dead)
+  w.unreadable.delete('queue/s1')
+  await $.turn.complete(ended('error'))
+  const listed = (await $.command.run(LIST)).text ?? ''
+  expect(listed).toContain('1. NEW')
+  expect(listed.slice(listed.indexOf('Not sent'))).toContain('DEAD_A')
+  expect(restartLogs(w.logs)).toHaveLength(1)
+  expect(w.notes).toHaveLength(1)
+  expect(w.store.get('queue/s1')).toMatchObject({ items: [{ text: 'NEW' }], recovery: [{ text: 'DEAD_A' }] })
+})
+
+test('after /clear the old key stays until the new session id has been checked', async ($, on) => {
+  const w = world(on, { fill: () => ({ isFilled: false, refusal: 'dialog' }) })
+  await $.session.start(SESSION)
+  await $.turn.start({ text: 'work', turnId: 't1' })
+  await $.prompt.submit(typed('OLD_A'))
+  await $.turn.complete(ended('error'))
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+  w.unreadable.add('queue/s2')
+  w.sid.value = 's2'
+  await w.clock.advance(200)
+  expect(w.store.get('queue/s1')).toMatchObject({ recovery: [{ text: 'OLD_A' }] })
+  expect(w.store.has('queue/s2')).toBe(false)
+  w.unreadable.delete('queue/s2')
+  await $.turn.start({ text: 'new', turnId: 't2' })
+  expect(w.store.has('queue/s1')).toBe(false)
+  expect(w.store.get('queue/s2')).toMatchObject({ recovery: [{ text: 'OLD_A' }] })
 })

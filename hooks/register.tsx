@@ -89,6 +89,13 @@ const savedKey = (sessionId: string) => `${SAVED_PREFIX}${sessionId}`
 // was untouched. Until then the write-through leaves the record alone, so a
 // change made before the check can't overwrite what a dead process left.
 const checkedSaved = new Set<string>()
+// Whether each session id's state was untouched (a new process) the first time
+// this module changed it, noted whether or not its record could be read then:
+// a record read only later is still restored, after what was queued since.
+const startedUntouched = new Map<string, boolean>()
+// Old session ids whose records a /clear or /resume moved to a new id: deleted
+// once the new id is checked (its own record read), never before.
+const movedFrom = new Map<string, string[]>()
 // What this module last wrote per key (null: deleted), to skip rewrites.
 const lastSaved = new Map<string, { text: string; at: number } | null>()
 
@@ -107,8 +114,14 @@ async function readSaved(
   }
 }
 
-function withSaved(q: Queue, base: Queue, saved: SavedQueue | undefined): { next: Queue; count: number } {
-  return saved !== undefined && isUntouched(q) ? restoreSaved(base, saved) : { next: base, count: 0 }
+// Whether `q` (the state before this change) counts as a new process's: the
+// first look at the session id decides, and later changes keep that answer.
+function wasUntouched(sessionId: string | undefined, q: Queue): boolean {
+  return (sessionId === undefined ? undefined : startedUntouched.get(sessionId)) ?? isUntouched(q)
+}
+
+function withSaved(untouched: boolean, base: Queue, saved: SavedQueue | undefined): { next: Queue; count: number } {
+  return saved !== undefined && untouched ? restoreSaved(base, saved) : { next: base, count: 0 }
 }
 
 // Writes `q`'s record for `sessionId`, or deletes it when nothing is left to
@@ -145,18 +158,36 @@ async function forgetSaved($: EngineInterface, sessionId: string): Promise<void>
   }
 }
 
-// After a write to `sessionId`'s state: mark its record checked, write it
-// through, and say what a restore put under Not sent.
+// After a write to `sessionId`'s state: note whether it started untouched,
+// mark its record checked if it was read, write it through, delete the old
+// ids' records it took over, and say what a restore put under Not sent.
 async function afterStateWrite(
   $: EngineInterface,
   sessionId: string | undefined,
   read: { isRead: boolean },
+  untouched: boolean,
   q: Queue,
   restored: number,
 ): Promise<void> {
-  if (read.isRead && sessionId !== undefined) checkedSaved.add(sessionId)
+  if (sessionId !== undefined) {
+    if (!startedUntouched.has(sessionId)) startedUntouched.set(sessionId, untouched)
+    if (read.isRead) checkedSaved.add(sessionId)
+  }
   await writeSaved($, sessionId, q)
+  if (sessionId !== undefined && checkedSaved.has(sessionId)) {
+    for (const old of movedFrom.get(sessionId) ?? []) await forgetSaved($, old)
+    movedFrom.delete(sessionId)
+  }
   if (restored > 0) reportRestored($, restored)
+}
+
+// A /clear carry from `from` was adopted under `to`. `from`'s record goes once
+// `to` is checked, but only if it was ours: an unchecked id's key may still
+// hold what a dead process left, so it stays.
+function noteMoved(from: string, to: string): void {
+  const olds = [...(movedFrom.get(from) ?? []), ...(checkedSaved.has(from) ? [from] : [])]
+  movedFrom.delete(from)
+  if (olds.length > 0) movedFrom.set(to, [...(movedFrom.get(to) ?? []), ...olds])
 }
 
 // Typed input came back from a dead process: the band shows it only when
@@ -206,12 +237,14 @@ async function applyToOwner($: EngineInterface, change: (q: Queue) => Queue): Pr
   if (c === null) {
     const read = await readSaved($, sessionId)
     let restored = 0
+    let untouched = false
     const next = await update($, queue, q => {
-      const r = withSaved(q, q, read.saved)
+      untouched = wasUntouched(sessionId, q)
+      const r = withSaved(untouched, q, read.saved)
       restored = r.count
       return change(r.next)
     })
-    await afterStateWrite($, sessionId, read, next, restored)
+    await afterStateWrite($, sessionId, read, untouched, next, restored)
     return next
   }
   if (ownerOf(c.from, sessionId) === 'carry') {
@@ -228,14 +261,16 @@ async function applyToOwner($: EngineInterface, change: (q: Queue) => Queue): Pr
   // a dead process left a record for keeps that record's prompts too.
   const read = await readSaved($, sessionId)
   let restored = 0
+  let untouched = false
   const adopted = await update($, queue, q => {
-    const r = withSaved(q, mergeCarry(q, c.value), read.saved)
+    untouched = wasUntouched(sessionId, q)
+    const r = withSaved(untouched, mergeCarry(q, c.value), read.saved)
     restored = r.count
     return change(r.next)
   })
   if (carry === c) carry = null
-  await afterStateWrite($, sessionId, read, adopted, restored)
-  if (sessionId !== c.from) await forgetSaved($, c.from)
+  if (sessionId !== undefined && sessionId !== c.from) noteMoved(c.from, sessionId)
+  await afterStateWrite($, sessionId, read, untouched, adopted, restored)
   return adopted
 }
 
